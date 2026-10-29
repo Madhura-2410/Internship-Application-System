@@ -1,0 +1,153 @@
+{
+  "entities": {
+    "InternshipApplication": {
+      "title": "InternshipApplication",
+      "description": "Internship application submitted by a candidate to Company Tech",
+      "type": "object",
+      "properties": {
+        "applicationId": {
+          "type": "string",
+          "description": "Unique backend-generated application identifier (e.g. CT-2026-XXXXX)",
+          "maxLength": 64
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Applicant full legal name",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Applicant primary contact email",
+          "maxLength": 150
+        },
+        "college": {
+          "type": "string",
+          "description": "Applicant college or university name",
+          "minLength": 2,
+          "maxLength": 150
+        },
+        "pursuingYear": {
+          "type": "string",
+          "description": "Pursuing academic year (e.g. 1st Year, 2nd Year, 3rd Year, 4th Year, Graduated)",
+          "maxLength": 50
+        },
+        "experienceLevel": {
+          "type": "string",
+          "enum": ["Fresher", "Experienced"],
+          "description": "Applicant background experience level"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "Frontend Developer",
+            "Backend Developer",
+            "Full-Stack Developer",
+            "AI/ML Engineer",
+            "UI/UX Designer",
+            "Graphic Designer",
+            "Digital Marketing Intern",
+            "Social Media Manager",
+            "Content Writer",
+            "Business Development Intern",
+            "Community Manager",
+            "HR Intern"
+          ],
+          "description": "Selected approved internship role"
+        },
+        "resumeUrl": {
+          "type": "string",
+          "description": "Storage download URL or reference for uploaded resume",
+          "maxLength": 1000
+        },
+        "resumeStoragePath": {
+          "type": "string",
+          "description": "Storage path where the candidate resume is archived",
+          "maxLength": 500
+        },
+        "resumeFileName": {
+          "type": "string",
+          "description": "Original filename of uploaded resume",
+          "maxLength": 200
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Pending", "Accepted", "Rejected"],
+          "description": "Current status of the internship application"
+        },
+        "appliedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of application submission"
+        },
+        "decision": {
+          "type": "object",
+          "description": "Administrative decision metadata and parameters"
+        },
+        "offerLetterStoragePath": {
+          "type": "string",
+          "description": "Storage path or URL of the generated official offer letter PDF",
+          "maxLength": 500
+        },
+        "offerLetterUrl": {
+          "type": "string",
+          "description": "Public or signed download link for the offer letter",
+          "maxLength": 1000
+        },
+        "emailProcessing": {
+          "type": "object",
+          "description": "Real email tracking states for applicant confirmation, support alert, and decision notice"
+        }
+      },
+      "required": [
+        "applicationId",
+        "fullName",
+        "email",
+        "college",
+        "pursuingYear",
+        "experienceLevel",
+        "role",
+        "status",
+        "appliedAt"
+      ]
+    },
+    "Admin": {
+      "title": "Admin",
+      "description": "Authorized administrator profile for Company Tech",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Administrator Firebase Authentication UID"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Administrator email address"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin"],
+          "description": "System role designation"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when admin access was provisioned"
+        }
+      },
+      "required": ["uid", "email", "role"]
+    }
+  },
+  "firestore": {
+    "/internshipApplications/{applicationId}": {
+      "schema": "InternshipApplication",
+      "description": "Collection of candidate internship applications and administrative workflow records"
+    },
+    "/admins/{adminId}": {
+      "schema": "Admin",
+      "description": "Authorized administrators who can review, accept, and reject internship applications"
+    }
+  }
+}

@@ -1,0 +1,146 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'madhurashekarraju@gmail.com'
+      );
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.size() >= 5 && email.size() <= 150 && email.matches('^[^@]+@[^@]+\\.[^@]+$');
+    }
+
+    function isValidRole(role) {
+      return role in [
+        'Frontend Developer',
+        'Backend Developer',
+        'Full-Stack Developer',
+        'AI/ML Engineer',
+        'UI/UX Designer',
+        'Graphic Designer',
+        'Digital Marketing Intern',
+        'Social Media Manager',
+        'Content Writer',
+        'Business Development Intern',
+        'Community Manager',
+        'HR Intern'
+      ];
+    }
+
+    function isValidExperience(exp) {
+      return exp in ['Fresher', 'Experienced'];
+    }
+
+    function isValidApplicationCreate(data) {
+      return data.keys().hasAll([
+        'applicationId', 'fullName', 'email', 'college', 'pursuingYear',
+        'experienceLevel', 'role', 'status', 'appliedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'applicationId', 'fullName', 'email', 'college', 'pursuingYear',
+        'experienceLevel', 'role', 'status', 'appliedAt',
+        'resumeUrl', 'resumeStoragePath', 'resumeFileName', 'resumeBase64',
+        'decision', 'offerLetterStoragePath', 'offerLetterUrl', 'emailProcessing'
+      ]) &&
+      data.applicationId is string && data.applicationId.size() <= 64 &&
+      data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 100 &&
+      isValidEmail(data.email) &&
+      data.college is string && data.college.size() >= 2 && data.college.size() <= 150 &&
+      data.pursuingYear is string && data.pursuingYear.size() <= 50 &&
+      isValidExperience(data.experienceLevel) &&
+      isValidRole(data.role) &&
+      data.status == 'Pending' &&
+      data.appliedAt is string && data.appliedAt.size() <= 50;
+    }
+
+    // Admins Collection
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && (request.auth.uid == adminId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && (request.auth.uid == adminId || isAdmin());
+      allow update, delete: if isAdmin();
+    }
+
+    // Duplicate Prevention Roll
+    match /applicationRoll/{key} {
+      allow get: if true;
+      allow create: if true;
+      allow update, delete: if true;
+    }
+
+    // Internship Applications Collection
+    match /internshipApplications/{applicationId} {
+      // Individual document lookup by unique ID
+      allow get: if true;
+
+      // Only authorized administrators can query/list all applicants
+      allow list: if isAdmin();
+
+      // Candidates can submit their application
+      allow create: if isValidId(applicationId) &&
+        incoming().applicationId == applicationId &&
+        isValidApplicationCreate(incoming());
+
+      // Administrators can update status and decisions; system updates for delivery tracking
+      allow update: if isValidId(applicationId) &&
+        incoming().applicationId == existing().applicationId &&
+        incoming().fullName == existing().fullName &&
+        incoming().email == existing().email &&
+        incoming().appliedAt == existing().appliedAt &&
+        (
+          // Action: Accept Pending application
+          (
+            existing().status == 'Pending' &&
+            incoming().status == 'Accepted' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'decision', 'offerLetterStoragePath', 'offerLetterUrl', 'emailProcessing']) &&
+            incoming().decision.action == 'Accepted' &&
+            incoming().decision.duration in ['1 month', '2 months', '3 months'] &&
+            incoming().decision.joiningDate is string
+          ) ||
+          // Action: Reject Pending application
+          (
+            existing().status == 'Pending' &&
+            incoming().status == 'Rejected' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'decision', 'emailProcessing']) &&
+            incoming().decision.action == 'Rejected'
+          ) ||
+          // Action: Retry or record notification delivery status
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['emailProcessing', 'offerLetterStoragePath', 'offerLetterUrl'])
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    // Verification probe collection
+    match /test/connection {
+      allow read: if true;
+    }
+  }
+}
