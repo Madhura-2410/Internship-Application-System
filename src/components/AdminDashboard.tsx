@@ -5,6 +5,7 @@ import {
   ApplicationStatus,
   APPROVED_ROLES,
   InternshipDuration,
+  EmailLogRecord,
 } from '../types';
 import {
   Briefcase,
@@ -27,6 +28,8 @@ import {
   ExternalLink,
   ChevronRight,
   Info,
+  Send,
+  RefreshCw,
 } from 'lucide-react';
 import { downloadOfferLetterPdf } from '../lib/pdfGenerator';
 
@@ -38,6 +41,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
   const [applications, setApplications] = useState<InternshipApplication[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // View Navigation
+  const [activeTab, setActiveTab] = useState<'applications' | 'emailLogs'>('applications');
+  const [emailLogs, setEmailLogs] = useState<EmailLogRecord[]>([]);
+  const [loadingLogs, setLoadingLogs] = useState(false);
+  const [emailLogStatusFilter, setEmailLogStatusFilter] = useState<'All' | 'Sent' | 'Failed' | 'Pending'>('All');
 
   // Filters
   const [searchQuery, setSearchQuery] = useState('');
@@ -51,6 +60,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
   const [acceptingApp, setAcceptingApp] = useState<InternshipApplication | null>(null);
   const [rejectingApp, setRejectingApp] = useState<InternshipApplication | null>(null);
   const [showConfigModal, setShowConfigModal] = useState(false);
+  const [confirmForceTarget, setConfirmForceTarget] = useState<{
+    appId: string;
+    target: string;
+    title: string;
+  } | null>(null);
+
+  // Retry Feedback Banner
+  const [retryFeedback, setRetryFeedback] = useState<{
+    type: 'success' | 'error' | 'info';
+    message: string;
+  } | null>(null);
 
   // Decision Form States
   const [acceptDuration, setAcceptDuration] = useState<InternshipDuration>('1 month');
@@ -96,6 +116,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
     }
   };
 
+  const fetchEmailLogs = async () => {
+    try {
+      setLoadingLogs(true);
+      const res = await fetch('/api/admin/email-logs', {
+        headers: {
+          'x-admin-email': adminEmail,
+        },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setEmailLogs(data.logs || []);
+      }
+    } catch (e) {
+      console.warn('Fetch email logs note:', e);
+    } finally {
+      setLoadingLogs(false);
+    }
+  };
+
   const fetchSystemConfig = async () => {
     try {
       const res = await fetch('/api/system/config');
@@ -108,9 +147,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
     }
   };
 
+  const refreshAll = async () => {
+    await Promise.all([fetchApplications(), fetchEmailLogs(), fetchSystemConfig()]);
+  };
+
   useEffect(() => {
-    fetchApplications();
-    fetchSystemConfig();
+    refreshAll();
   }, [adminEmail]);
 
   // Handle Accept
@@ -194,9 +236,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
     }
   };
 
-  // Handle Retry Email / Notification
-  const handleRetryNotification = async (appId: string, target: string) => {
+  // Handle Retry Email / Notification with Idempotency Support
+  const handleRetryNotification = async (appId: string, target: string, force: boolean = false) => {
     setRetryingTarget(`${appId}-${target}`);
+    setRetryFeedback(null);
     try {
       const res = await fetch(`/api/applications/${appId}/retry`, {
         method: 'POST',
@@ -204,14 +247,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
           'Content-Type': 'application/json',
           'x-admin-email': adminEmail,
         },
-        body: JSON.stringify({ target, adminEmail }),
+        body: JSON.stringify({ target, adminEmail, force }),
       });
 
       const data = await res.json();
       if (!res.ok) {
-        alert(data.error || 'Retry attempt failed.');
+        setRetryFeedback({
+          type: 'error',
+          message: data.error || 'Retry attempt failed.',
+        });
       } else {
-        await fetchApplications();
+        setRetryFeedback({
+          type: data.success ? 'success' : 'info',
+          message: data.alreadySent
+            ? 'Idempotency Notice: Email has already been marked as Sent. To force a duplicate email, confirm resend.'
+            : data.success
+            ? 'Email notification successfully delivered.'
+            : `Attempt logged in Firestore: ${data.error || 'Delivery failed'}`,
+        });
+        await Promise.all([fetchApplications(), fetchEmailLogs()]);
         // Update selectedApp view if open
         if (selectedApp && selectedApp.applicationId === appId) {
           setSelectedApp((prev) => (prev ? { ...prev, emailProcessing: data.emailProcessing } : null));
@@ -219,7 +273,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
       }
     } catch (err: any) {
       console.error('Retry error:', err);
-      alert('Failed to retry operation: ' + err.message);
+      setRetryFeedback({
+        type: 'error',
+        message: 'Failed to execute retry: ' + (err.message || String(err)),
+      });
     } finally {
       setRetryingTarget(null);
     }
@@ -391,327 +448,599 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
         </div>
       </div>
 
-      {/* Filter and Search Bar */}
-      <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-xs space-y-3">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-          {/* Search Input */}
-          <div className="relative md:col-span-2">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search by ID, name, email, college..."
-              className="w-full pl-9 pr-3 py-2 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-600"
-            />
-          </div>
-
-          {/* Status Filter */}
-          <div>
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as any)}
-              className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-600 bg-white"
-            >
-              <option value="All">All Statuses ({totalCount})</option>
-              <option value="Pending">Pending ({pendingCount})</option>
-              <option value="Accepted">Accepted ({acceptedCount})</option>
-              <option value="Rejected">Rejected ({rejectedCount})</option>
-            </select>
-          </div>
-
-          {/* Role Filter */}
-          <div>
-            <select
-              value={roleFilter}
-              onChange={(e) => setRoleFilter(e.target.value)}
-              className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-600 bg-white"
-            >
-              <option value="All">All Roles (12 Tracks)</option>
-              {APPROVED_ROLES.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.title}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-xs text-slate-500">
-          <div className="flex items-center gap-3">
-            <span>Experience:</span>
-            <button
-              onClick={() => setExperienceFilter('All')}
-              className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
-                experienceFilter === 'All' ? 'bg-slate-900 text-white' : 'hover:bg-slate-100'
-              }`}
-            >
-              All
-            </button>
-            <button
-              onClick={() => setExperienceFilter('Fresher')}
-              className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
-                experienceFilter === 'Fresher' ? 'bg-slate-900 text-white' : 'hover:bg-slate-100'
-              }`}
-            >
-              Fresher
-            </button>
-            <button
-              onClick={() => setExperienceFilter('Experienced')}
-              className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
-                experienceFilter === 'Experienced' ? 'bg-slate-900 text-white' : 'hover:bg-slate-100'
-              }`}
-            >
-              Experienced
-            </button>
-          </div>
-
+      {/* Real-time Retry / Operation Feedback Notification Banner */}
+      {retryFeedback && (
+        <div
+          className={`p-3.5 rounded-xl border flex items-center justify-between text-xs animate-in fade-in duration-200 ${
+            retryFeedback.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+              : retryFeedback.type === 'error'
+              ? 'bg-rose-50 border-rose-200 text-rose-900'
+              : 'bg-blue-50 border-blue-200 text-blue-900'
+          }`}
+        >
           <div className="flex items-center gap-2">
-            <span>Sort:</span>
-            <button
-              onClick={() => setSortOrder(sortOrder === 'desc' ? 'asc' : 'desc')}
-              className="text-[11px] font-semibold text-slate-700 hover:text-slate-900 underline"
-            >
-              {sortOrder === 'desc' ? 'Newest First' : 'Oldest First'}
-            </button>
+            {retryFeedback.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : retryFeedback.type === 'error' ? (
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+            ) : (
+              <Info className="w-4 h-4 text-blue-600 shrink-0" />
+            )}
+            <span className="font-medium">{retryFeedback.message}</span>
           </div>
+          <button
+            onClick={() => setRetryFeedback(null)}
+            className="text-slate-400 hover:text-slate-600 p-1 text-xs"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Segmented View Navigation */}
+      <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setActiveTab('applications')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+              activeTab === 'applications'
+                ? 'bg-slate-900 text-white shadow-xs'
+                : 'text-slate-600 bg-white border border-slate-200 hover:bg-slate-50'
+            }`}
+          >
+            <Briefcase className="w-3.5 h-3.5" />
+            <span>Applications ({totalCount})</span>
+          </button>
+
+          <button
+            onClick={() => {
+              setActiveTab('emailLogs');
+              fetchEmailLogs();
+            }}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+              activeTab === 'emailLogs'
+                ? 'bg-slate-900 text-white shadow-xs'
+                : 'text-slate-600 bg-white border border-slate-200 hover:bg-slate-50'
+            }`}
+          >
+            <Mail className="w-3.5 h-3.5" />
+            <span>Outbound Email Audit Records ({emailLogs.length})</span>
+            {failedNotificationsCount > 0 && (
+              <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-rose-500 text-white">
+                {failedNotificationsCount} failed
+              </span>
+            )}
+          </button>
+        </div>
+
+        <div className="text-xs text-slate-500 font-mono hidden sm:flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-emerald-500" />
+          <span>Provider: <strong className="text-slate-800">{systemConfig?.outboundProvider || 'Resend'}</strong></span>
         </div>
       </div>
 
-      {/* Main Table / Applications List */}
-      <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
-        {loading ? (
-          <div className="p-12 text-center text-slate-500">
-            <div className="w-8 h-8 border-3 border-slate-200 border-t-slate-800 rounded-full animate-spin mx-auto mb-3" />
-            <p className="text-xs font-semibold">Retrieving applications from Cloud Firestore...</p>
+      {activeTab === 'applications' ? (
+        <>
+          {/* Filter and Search Bar */}
+          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-xs space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              {/* Search Input */}
+              <div className="relative md:col-span-2">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search by ID, name, email, college..."
+                  className="w-full pl-9 pr-3 py-2 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-600"
+                />
+              </div>
+
+              {/* Status Filter */}
+              <div>
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as any)}
+                  className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-600 bg-white"
+                >
+                  <option value="All">All Statuses ({totalCount})</option>
+                  <option value="Pending">Pending ({pendingCount})</option>
+                  <option value="Accepted">Accepted ({acceptedCount})</option>
+                  <option value="Rejected">Rejected ({rejectedCount})</option>
+                </select>
+              </div>
+
+              {/* Role Filter */}
+              <div>
+                <select
+                  value={roleFilter}
+                  onChange={(e) => setRoleFilter(e.target.value)}
+                  className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-600 bg-white"
+                >
+                  <option value="All">All Roles (12 Tracks)</option>
+                  {APPROVED_ROLES.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-xs text-slate-500">
+              <div className="flex items-center gap-3">
+                <span>Experience:</span>
+                <button
+                  onClick={() => setExperienceFilter('All')}
+                  className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
+                    experienceFilter === 'All' ? 'bg-slate-900 text-white' : 'hover:bg-slate-100'
+                  }`}
+                >
+                  All
+                </button>
+                <button
+                  onClick={() => setExperienceFilter('Fresher')}
+                  className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
+                    experienceFilter === 'Fresher' ? 'bg-slate-900 text-white' : 'hover:bg-slate-100'
+                  }`}
+                >
+                  Fresher
+                </button>
+                <button
+                  onClick={() => setExperienceFilter('Experienced')}
+                  className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
+                    experienceFilter === 'Experienced' ? 'bg-slate-900 text-white' : 'hover:bg-slate-100'
+                  }`}
+                >
+                  Experienced
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span>Sort:</span>
+                <button
+                  onClick={() => setSortOrder(sortOrder === 'desc' ? 'asc' : 'desc')}
+                  className="text-[11px] font-semibold text-slate-700 hover:text-slate-900 underline"
+                >
+                  {sortOrder === 'desc' ? 'Newest First' : 'Oldest First'}
+                </button>
+              </div>
+            </div>
           </div>
-        ) : error ? (
-          <div className="p-10 text-center text-rose-800">
-            <AlertTriangle className="w-8 h-8 text-rose-600 mx-auto mb-2" />
-            <p className="font-bold text-sm">Failed to Load Application Records</p>
-            <p className="text-xs text-slate-600 mt-1 max-w-md mx-auto">{error}</p>
+
+          {/* Main Table / Applications List */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+            {loading ? (
+              <div className="p-12 text-center text-slate-500">
+                <div className="w-8 h-8 border-3 border-slate-200 border-t-slate-800 rounded-full animate-spin mx-auto mb-3" />
+                <p className="text-xs font-semibold">Retrieving applications from Cloud Firestore...</p>
+              </div>
+            ) : error ? (
+              <div className="p-10 text-center text-rose-800">
+                <AlertTriangle className="w-8 h-8 text-rose-600 mx-auto mb-2" />
+                <p className="font-bold text-sm">Failed to Load Application Records</p>
+                <p className="text-xs text-slate-600 mt-1 max-w-md mx-auto">{error}</p>
+                <button
+                  onClick={refreshAll}
+                  className="mt-4 px-4 py-2 bg-slate-900 text-white rounded-lg text-xs font-bold hover:bg-slate-800"
+                >
+                  Retry Connection
+                </button>
+              </div>
+            ) : filteredApps.length === 0 ? (
+              <div className="p-12 text-center text-slate-500">
+                <FileText className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+                <h3 className="font-bold text-sm text-slate-800">No applications match criteria</h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Try adjusting your search query, status, or role filter.
+                </p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase tracking-wider text-[10px]">
+                      <th className="py-3 px-4">Application ID</th>
+                      <th className="py-3 px-4">Applicant Profile</th>
+                      <th className="py-3 px-4">Role & Year</th>
+                      <th className="py-3 px-4">Resume</th>
+                      <th className="py-3 px-4">Applied Date</th>
+                      <th className="py-3 px-4">Status</th>
+                      <th className="py-3 px-4">Notifications</th>
+                      <th className="py-3 px-4 text-right">Decisions & Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredApps.map((app) => {
+                      const hasResume = !!app.resumeFileName;
+                      const isPending = app.status === 'Pending';
+                      const isAccepted = app.status === 'Accepted';
+                      const isRejected = app.status === 'Rejected';
+
+                      return (
+                        <tr
+                          key={app.applicationId}
+                          className="hover:bg-slate-50/70 transition-colors"
+                        >
+                          {/* ID */}
+                          <td className="py-3.5 px-4 font-mono font-bold text-slate-900">
+                            {app.applicationId}
+                          </td>
+
+                          {/* Profile */}
+                          <td className="py-3.5 px-4">
+                            <div className="font-bold text-slate-900 text-xs">{app.fullName}</div>
+                            <div className="text-slate-500 text-[11px] truncate max-w-[180px]">
+                              {app.email}
+                            </div>
+                            <div className="text-slate-400 text-[10px] truncate max-w-[180px]">
+                              {app.college}
+                            </div>
+                          </td>
+
+                          {/* Role & Year */}
+                          <td className="py-3.5 px-4">
+                            <div className="font-semibold text-teal-900">{app.role}</div>
+                            <div className="text-slate-500 text-[11px] flex items-center gap-1.5 mt-0.5">
+                              <span>{app.pursuingYear}</span>
+                              <span>•</span>
+                              <span
+                                className={`px-1.5 py-0.2 rounded text-[10px] font-medium ${
+                                  app.experienceLevel === 'Experienced'
+                                    ? 'bg-purple-50 text-purple-700'
+                                    : 'bg-slate-100 text-slate-600'
+                                }`}
+                              >
+                                {app.experienceLevel}
+                              </span>
+                            </div>
+                          </td>
+
+                          {/* Resume */}
+                          <td className="py-3.5 px-4">
+                            {hasResume ? (
+                              <button
+                                onClick={() => setSelectedApp(app)}
+                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-teal-700 hover:text-teal-900 bg-teal-50 hover:bg-teal-100 px-2.5 py-1 rounded-lg border border-teal-200 transition-colors"
+                              >
+                                <FileText className="w-3.5 h-3.5" />
+                                <span>View</span>
+                              </button>
+                            ) : (
+                              <span className="text-slate-400 text-[11px]">None</span>
+                            )}
+                          </td>
+
+                          {/* Applied Date */}
+                          <td className="py-3.5 px-4 text-slate-600">
+                            <div>{new Date(app.appliedAt).toLocaleDateString()}</div>
+                            <div className="text-[10px] text-slate-400">
+                              {new Date(app.appliedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </div>
+                          </td>
+
+                          {/* Status */}
+                          <td className="py-3.5 px-4">
+                            {isPending && (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300">
+                                <Clock className="w-3 h-3 text-amber-600" />
+                                <span>Pending</span>
+                              </span>
+                            )}
+                            {isAccepted && (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-300">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                <span>Accepted</span>
+                              </span>
+                            )}
+                            {isRejected && (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-300">
+                                <XCircle className="w-3 h-3 text-slate-500" />
+                                <span>Rejected</span>
+                              </span>
+                            )}
+                          </td>
+
+                          {/* Notifications / Diagnostics */}
+                          <td className="py-3.5 px-4">
+                            <div className="flex flex-col gap-1 text-[10px]">
+                              {/* Applicant confirmation */}
+                              <div className="flex items-center gap-1.5">
+                                <span
+                                  className={`w-2 h-2 rounded-full shrink-0 ${
+                                    app.emailProcessing?.applicantConfirmation?.status === 'Sent'
+                                      ? 'bg-emerald-500'
+                                      : app.emailProcessing?.applicantConfirmation?.status === 'Failed'
+                                      ? 'bg-rose-500'
+                                      : 'bg-amber-400'
+                                  }`}
+                                />
+                                <span className="text-slate-500 font-medium">Applicant:</span>
+                                <span
+                                  className={`font-bold ${
+                                    app.emailProcessing?.applicantConfirmation?.status === 'Sent'
+                                      ? 'text-emerald-700'
+                                      : app.emailProcessing?.applicantConfirmation?.status === 'Failed'
+                                      ? 'text-rose-700'
+                                      : 'text-amber-700'
+                                  }`}
+                                >
+                                  {app.emailProcessing?.applicantConfirmation?.status || 'Pending'}
+                                </span>
+                              </div>
+
+                              {/* Support Alert */}
+                              <div className="flex items-center gap-1.5">
+                                <span
+                                  className={`w-2 h-2 rounded-full shrink-0 ${
+                                    app.emailProcessing?.supportNotification?.status === 'Sent'
+                                      ? 'bg-blue-500'
+                                      : app.emailProcessing?.supportNotification?.status === 'Failed'
+                                      ? 'bg-rose-500'
+                                      : 'bg-amber-400'
+                                  }`}
+                                />
+                                <span className="text-slate-500 font-medium">Support:</span>
+                                <span
+                                  className={`font-bold ${
+                                    app.emailProcessing?.supportNotification?.status === 'Sent'
+                                      ? 'text-blue-700'
+                                      : app.emailProcessing?.supportNotification?.status === 'Failed'
+                                      ? 'text-rose-700'
+                                      : 'text-amber-700'
+                                  }`}
+                                >
+                                  {app.emailProcessing?.supportNotification?.status || 'Pending'}
+                                </span>
+                              </div>
+
+                              {/* Decision Notification */}
+                              {(isAccepted || isRejected) && (
+                                <div className="flex items-center gap-1.5">
+                                  <span
+                                    className={`w-2 h-2 rounded-full shrink-0 ${
+                                      app.emailProcessing?.decisionEmail?.status === 'Sent'
+                                        ? 'bg-purple-500'
+                                        : app.emailProcessing?.decisionEmail?.status === 'Failed'
+                                        ? 'bg-rose-500'
+                                        : 'bg-amber-400'
+                                    }`}
+                                  />
+                                  <span className="text-slate-500 font-medium">Decision:</span>
+                                  <span
+                                    className={`font-bold ${
+                                      app.emailProcessing?.decisionEmail?.status === 'Sent'
+                                        ? 'text-purple-700'
+                                        : app.emailProcessing?.decisionEmail?.status === 'Failed'
+                                        ? 'text-rose-700'
+                                        : 'text-amber-700'
+                                    }`}
+                                  >
+                                    {app.emailProcessing?.decisionEmail?.status || 'Pending'}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          </td>
+
+                          {/* Actions */}
+                          <td className="py-3.5 px-4 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                onClick={() => setSelectedApp(app)}
+                                className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors"
+                                title="Inspect Details"
+                              >
+                                <Eye className="w-4 h-4" />
+                              </button>
+
+                              {isPending && (
+                                <>
+                                  <button
+                                    onClick={() => {
+                                      setAcceptingApp(app);
+                                      setDecisionError(null);
+                                    }}
+                                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold shadow-2xs transition-colors"
+                                  >
+                                    Accept
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setRejectingApp(app);
+                                      setDecisionError(null);
+                                    }}
+                                    className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-[11px] font-bold transition-colors"
+                                  >
+                                    Reject
+                                  </button>
+                                </>
+                              )}
+
+                              {isAccepted && (
+                                <button
+                                  onClick={() => handleDownloadPdf(app)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200 rounded-lg text-[11px] font-bold transition-colors"
+                                  title="Download Genuine Offer Letter PDF"
+                                >
+                                  <FileDown className="w-3.5 h-3.5 text-teal-600" />
+                                  <span>PDF</span>
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      ) : (
+        /* EMAIL DELIVERY AUDIT LOGS VIEW */
+        <div className="space-y-4">
+          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-500 font-semibold">Filter Status:</span>
+              {(['All', 'Sent', 'Failed', 'Pending'] as const).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setEmailLogStatusFilter(s)}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-colors ${
+                    emailLogStatusFilter === s
+                      ? 'bg-slate-900 text-white'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+
             <button
-              onClick={fetchApplications}
-              className="mt-4 px-4 py-2 bg-slate-900 text-white rounded-lg text-xs font-bold hover:bg-slate-800"
+              onClick={fetchEmailLogs}
+              disabled={loadingLogs}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
             >
-              Retry Connection
+              <RotateCcw className={`w-3.5 h-3.5 ${loadingLogs ? 'animate-spin' : ''}`} />
+              <span>Refresh Records</span>
             </button>
           </div>
-        ) : filteredApps.length === 0 ? (
-          <div className="p-12 text-center text-slate-500">
-            <FileText className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-            <h3 className="font-bold text-sm text-slate-800">No applications match criteria</h3>
-            <p className="text-xs text-slate-500 mt-1">
-              Try adjusting your search query, status, or role filter.
-            </p>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs">
-              <thead>
-                <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase tracking-wider text-[10px]">
-                  <th className="py-3 px-4">Application ID</th>
-                  <th className="py-3 px-4">Applicant Profile</th>
-                  <th className="py-3 px-4">Role & Year</th>
-                  <th className="py-3 px-4">Resume</th>
-                  <th className="py-3 px-4">Applied Date</th>
-                  <th className="py-3 px-4">Status</th>
-                  <th className="py-3 px-4">Notifications</th>
-                  <th className="py-3 px-4 text-right">Decisions & Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {filteredApps.map((app) => {
-                  const hasResume = !!app.resumeFileName;
-                  const isPending = app.status === 'Pending';
-                  const isAccepted = app.status === 'Accepted';
-                  const isRejected = app.status === 'Rejected';
 
-                  return (
-                    <tr
-                      key={app.applicationId}
-                      className="hover:bg-slate-50/70 transition-colors"
-                    >
-                      {/* ID */}
-                      <td className="py-3.5 px-4 font-mono font-bold text-slate-900">
-                        {app.applicationId}
-                      </td>
-
-                      {/* Profile */}
-                      <td className="py-3.5 px-4">
-                        <div className="font-bold text-slate-900 text-xs">{app.fullName}</div>
-                        <div className="text-slate-500 text-[11px] truncate max-w-[180px]">
-                          {app.email}
-                        </div>
-                        <div className="text-slate-400 text-[10px] truncate max-w-[180px]">
-                          {app.college}
-                        </div>
-                      </td>
-
-                      {/* Role & Year */}
-                      <td className="py-3.5 px-4">
-                        <div className="font-semibold text-teal-900">{app.role}</div>
-                        <div className="text-slate-500 text-[11px] flex items-center gap-1.5 mt-0.5">
-                          <span>{app.pursuingYear}</span>
-                          <span>•</span>
-                          <span
-                            className={`px-1.5 py-0.2 rounded text-[10px] font-medium ${
-                              app.experienceLevel === 'Experienced'
-                                ? 'bg-purple-50 text-purple-700'
-                                : 'bg-slate-100 text-slate-600'
-                            }`}
-                          >
-                            {app.experienceLevel}
-                          </span>
-                        </div>
-                      </td>
-
-                      {/* Resume */}
-                      <td className="py-3.5 px-4">
-                        {hasResume ? (
-                          <button
-                            onClick={() => setSelectedApp(app)}
-                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-teal-700 hover:text-teal-900 bg-teal-50 hover:bg-teal-100 px-2.5 py-1 rounded-lg border border-teal-200 transition-colors"
-                          >
-                            <FileText className="w-3.5 h-3.5" />
-                            <span>View</span>
-                          </button>
-                        ) : (
-                          <span className="text-slate-400 text-[11px]">None</span>
-                        )}
-                      </td>
-
-                      {/* Applied Date */}
-                      <td className="py-3.5 px-4 text-slate-600">
-                        <div>{new Date(app.appliedAt).toLocaleDateString()}</div>
-                        <div className="text-[10px] text-slate-400">
-                          {new Date(app.appliedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        </div>
-                      </td>
-
-                      {/* Status */}
-                      <td className="py-3.5 px-4">
-                        {isPending && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300">
-                            <Clock className="w-3 h-3 text-amber-600" />
-                            <span>Pending</span>
-                          </span>
-                        )}
-                        {isAccepted && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-300">
-                            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                            <span>Accepted</span>
-                          </span>
-                        )}
-                        {isRejected && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-300">
-                            <XCircle className="w-3 h-3 text-slate-500" />
-                            <span>Rejected</span>
-                          </span>
-                        )}
-                      </td>
-
-                      {/* Notifications / Diagnostics */}
-                      <td className="py-3.5 px-4">
-                        <div className="flex items-center gap-1.5">
-                          {/* Applicant confirmation */}
-                          <span
-                            title={`Applicant Confirmation: ${app.emailProcessing?.applicantConfirmation?.status || 'Pending'}`}
-                            className={`w-2.5 h-2.5 rounded-full ${
-                              app.emailProcessing?.applicantConfirmation?.status === 'Sent'
-                                ? 'bg-emerald-500'
-                                : app.emailProcessing?.applicantConfirmation?.status === 'Failed'
-                                ? 'bg-rose-500'
-                                : 'bg-slate-300'
-                            }`}
-                          />
-                          {/* Support Alert */}
-                          <span
-                            title={`Support Alert: ${app.emailProcessing?.supportNotification?.status || 'Pending'}`}
-                            className={`w-2.5 h-2.5 rounded-full ${
-                              app.emailProcessing?.supportNotification?.status === 'Sent'
-                                ? 'bg-blue-500'
-                                : app.emailProcessing?.supportNotification?.status === 'Failed'
-                                ? 'bg-rose-500'
-                                : 'bg-slate-300'
-                            }`}
-                          />
-                          {/* Decision Notification */}
-                          {(isAccepted || isRejected) && (
-                            <span
-                              title={`Decision Email: ${app.emailProcessing?.decisionEmail?.status || 'Pending'}`}
-                              className={`w-2.5 h-2.5 rounded-full ${
-                                app.emailProcessing?.decisionEmail?.status === 'Sent'
-                                  ? 'bg-purple-500'
-                                  : app.emailProcessing?.decisionEmail?.status === 'Failed'
-                                  ? 'bg-rose-500'
-                                  : 'bg-slate-300'
-                              }`}
-                            />
-                          )}
-                          <button
-                            onClick={() => setSelectedApp(app)}
-                            className="text-[10px] text-slate-400 hover:text-slate-700 ml-1"
-                          >
-                            Details
-                          </button>
-                        </div>
-                      </td>
-
-                      {/* Actions */}
-                      <td className="py-3.5 px-4 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            onClick={() => setSelectedApp(app)}
-                            className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors"
-                            title="Inspect Details"
-                          >
-                            <Eye className="w-4 h-4" />
-                          </button>
-
-                          {isPending && (
-                            <>
-                              <button
-                                onClick={() => {
-                                  setAcceptingApp(app);
-                                  setDecisionError(null);
-                                }}
-                                className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold shadow-2xs transition-colors"
-                              >
-                                Accept
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setRejectingApp(app);
-                                  setDecisionError(null);
-                                }}
-                                className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-[11px] font-bold transition-colors"
-                              >
-                                Reject
-                              </button>
-                            </>
-                          )}
-
-                          {isAccepted && (
-                            <button
-                              onClick={() => handleDownloadPdf(app)}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200 rounded-lg text-[11px] font-bold transition-colors"
-                              title="Download Genuine Offer Letter PDF"
-                            >
-                              <FileDown className="w-3.5 h-3.5 text-teal-600" />
-                              <span>PDF</span>
-                            </button>
-                          )}
-                        </div>
-                      </td>
+          <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+            {loadingLogs ? (
+              <div className="p-12 text-center text-slate-500">
+                <div className="w-8 h-8 border-3 border-slate-200 border-t-slate-800 rounded-full animate-spin mx-auto mb-3" />
+                <p className="text-xs font-semibold">Loading email delivery audit logs from Firestore...</p>
+              </div>
+            ) : emailLogs.length === 0 ? (
+              <div className="p-12 text-center text-slate-500">
+                <Mail className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+                <h3 className="font-bold text-sm text-slate-800">No Email Records In Firestore</h3>
+                <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+                  When applicants submit forms or administrators make decisions, separate delivery records will be recorded here.
+                </p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase tracking-wider text-[10px]">
+                      <th className="py-3 px-4">Application ID</th>
+                      <th className="py-3 px-4">Notification Type</th>
+                      <th className="py-3 px-4">Recipient</th>
+                      <th className="py-3 px-4">Subject</th>
+                      <th className="py-3 px-4">Status</th>
+                      <th className="py-3 px-4">Provider / ID</th>
+                      <th className="py-3 px-4">Last Attempt</th>
+                      <th className="py-3 px-4 text-right">Action</th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {emailLogs
+                      .filter((l) => emailLogStatusFilter === 'All' || l.status === emailLogStatusFilter)
+                      .map((log) => {
+                        const targetKey =
+                          log.type === 'applicant_confirmation'
+                            ? 'applicantConfirmation'
+                            : log.type === 'support_notification'
+                            ? 'supportNotification'
+                            : 'decisionEmail';
+
+                        return (
+                          <tr key={log.id} className="hover:bg-slate-50/70">
+                            <td className="py-3.5 px-4 font-mono font-bold text-slate-900">
+                              {log.applicationId}
+                            </td>
+                            <td className="py-3.5 px-4 font-medium text-slate-800">
+                              <span className="capitalize">
+                                {log.type.replace(/_/g, ' ')}
+                              </span>
+                              {log.hasAttachment && (
+                                <span className="ml-1.5 px-1.5 py-0.2 rounded text-[10px] bg-teal-50 text-teal-800 border border-teal-200">
+                                  PDF
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 text-slate-600 font-mono text-[11px]">
+                              {log.recipient}
+                            </td>
+                            <td className="py-3.5 px-4 text-slate-700 max-w-[200px] truncate" title={log.subject}>
+                              {log.subject}
+                            </td>
+                            <td className="py-3.5 px-4">
+                              {log.status === 'Sent' && (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-300">
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                  <span>Sent</span>
+                                </span>
+                              )}
+                              {log.status === 'Failed' && (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-800 border border-rose-300">
+                                  <XCircle className="w-3 h-3 text-rose-600" />
+                                  <span>Failed</span>
+                                </span>
+                              )}
+                              {log.status === 'Pending' && (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300">
+                                  <Clock className="w-3 h-3 text-amber-600" />
+                                  <span>Pending</span>
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 text-slate-500 font-mono text-[11px]">
+                              <div>{log.provider || 'Resend'}</div>
+                              {log.messageId && (
+                                <div className="text-[10px] text-slate-400 truncate max-w-[120px]" title={log.messageId}>
+                                  {log.messageId}
+                                </div>
+                              )}
+                              {log.error && (
+                                <div className="text-[10px] text-rose-600 max-w-[150px] truncate" title={log.error}>
+                                  {log.error}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 text-slate-500 text-[11px]">
+                              {new Date(log.lastAttemptAt).toLocaleString()}
+                            </td>
+                            <td className="py-3.5 px-4 text-right">
+                              {log.status === 'Failed' ? (
+                                <button
+                                  onClick={() => handleRetryNotification(log.applicationId, targetKey, true)}
+                                  disabled={retryingTarget === `${log.applicationId}-${targetKey}`}
+                                  className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded-md text-[11px] font-bold transition-colors disabled:opacity-50"
+                                >
+                                  {retryingTarget === `${log.applicationId}-${targetKey}` ? 'Retrying...' : 'Retry Email'}
+                                </button>
+                              ) : log.status === 'Sent' ? (
+                                <button
+                                  onClick={() =>
+                                    setConfirmForceTarget({
+                                      appId: log.applicationId,
+                                      target: targetKey,
+                                      title: log.type.replace(/_/g, ' '),
+                                    })
+                                  }
+                                  className="px-2.5 py-1 text-slate-500 hover:text-slate-800 text-[11px] font-semibold border border-slate-200 rounded-md hover:bg-slate-50"
+                                >
+                                  Re-send
+                                </button>
+                              ) : null}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* DETAIL MODAL */}
       {selectedApp && (
@@ -863,13 +1192,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
                     )}
                   </div>
                 </div>
-                {selectedApp.emailProcessing?.applicantConfirmation?.status !== 'Sent' && (
+                {selectedApp.emailProcessing?.applicantConfirmation?.status === 'Sent' ? (
                   <button
                     onClick={() =>
-                      handleRetryNotification(selectedApp.applicationId, 'applicantConfirmation')
+                      setConfirmForceTarget({
+                        appId: selectedApp.applicationId,
+                        target: 'applicantConfirmation',
+                        title: 'Applicant Confirmation Email',
+                      })
+                    }
+                    className="px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-md border border-slate-200 transition-colors"
+                  >
+                    Re-send Email
+                  </button>
+                ) : (
+                  <button
+                    onClick={() =>
+                      handleRetryNotification(selectedApp.applicationId, 'applicantConfirmation', true)
                     }
                     disabled={retryingTarget === `${selectedApp.applicationId}-applicantConfirmation`}
-                    className="px-2.5 py-1 text-[11px] font-bold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
+                    className="px-2.5 py-1 text-[11px] font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-md transition-colors disabled:opacity-50"
                   >
                     {retryingTarget === `${selectedApp.applicationId}-applicantConfirmation`
                       ? 'Retrying...'
@@ -895,15 +1237,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
                     >
                       {selectedApp.emailProcessing?.supportNotification?.status || 'Pending'}
                     </span>
+                    {selectedApp.emailProcessing?.supportNotification?.error && (
+                      <span className="text-rose-600 block text-[10px] mt-0.5">
+                        {selectedApp.emailProcessing.supportNotification.error}
+                      </span>
+                    )}
                   </div>
                 </div>
-                {selectedApp.emailProcessing?.supportNotification?.status !== 'Sent' && (
+                {selectedApp.emailProcessing?.supportNotification?.status === 'Sent' ? (
                   <button
                     onClick={() =>
-                      handleRetryNotification(selectedApp.applicationId, 'supportNotification')
+                      setConfirmForceTarget({
+                        appId: selectedApp.applicationId,
+                        target: 'supportNotification',
+                        title: 'Admissions Support Alert',
+                      })
+                    }
+                    className="px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-md border border-slate-200 transition-colors"
+                  >
+                    Re-send Alert
+                  </button>
+                ) : (
+                  <button
+                    onClick={() =>
+                      handleRetryNotification(selectedApp.applicationId, 'supportNotification', true)
                     }
                     disabled={retryingTarget === `${selectedApp.applicationId}-supportNotification`}
-                    className="px-2.5 py-1 text-[11px] font-bold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
+                    className="px-2.5 py-1 text-[11px] font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-md transition-colors disabled:opacity-50"
                   >
                     {retryingTarget === `${selectedApp.applicationId}-supportNotification`
                       ? 'Retrying...'
@@ -939,13 +1299,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
                       )}
                     </div>
                   </div>
-                  {selectedApp.emailProcessing?.decisionEmail?.status !== 'Sent' && (
+                  {selectedApp.emailProcessing?.decisionEmail?.status === 'Sent' ? (
                     <button
                       onClick={() =>
-                        handleRetryNotification(selectedApp.applicationId, 'decisionEmail')
+                        setConfirmForceTarget({
+                          appId: selectedApp.applicationId,
+                          target: 'decisionEmail',
+                          title: selectedApp.status === 'Accepted' ? 'Official Offer Letter Email' : 'Rejection Letter Email',
+                        })
+                      }
+                      className="px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-md border border-slate-200 transition-colors"
+                    >
+                      Re-send Decision
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() =>
+                        handleRetryNotification(selectedApp.applicationId, 'decisionEmail', true)
                       }
                       disabled={retryingTarget === `${selectedApp.applicationId}-decisionEmail`}
-                      className="px-2.5 py-1 text-[11px] font-bold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
+                      className="px-2.5 py-1 text-[11px] font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-md transition-colors disabled:opacity-50"
                     >
                       {retryingTarget === `${selectedApp.applicationId}-decisionEmail`
                         ? 'Retrying...'
@@ -963,6 +1336,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
                 className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-xl"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CONFIRM FORCE RESEND MODAL (Idempotency Safe Guard) */}
+      {confirmForceTarget && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 max-w-md w-full p-6 shadow-2xl relative animate-in fade-in zoom-in duration-150">
+            <div className="flex items-center gap-2 mb-3 text-amber-700">
+              <AlertTriangle className="w-5 h-5 text-amber-600" />
+              <h3 className="font-bold text-base text-slate-900">Confirm Email Resend</h3>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed mb-4">
+              The notification for <strong>{confirmForceTarget.title}</strong> has already been marked as <strong>Sent</strong>.
+              To preserve submission integrity and prevent unintentional duplicates, please confirm if you intentionally wish to trigger a re-dispatch.
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmForceTarget(null)}
+                className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = confirmForceTarget;
+                  setConfirmForceTarget(null);
+                  handleRetryNotification(target.appId, target.target, true);
+                }}
+                className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-all shadow-xs"
+              >
+                Confirm Re-send
               </button>
             </div>
           </div>
@@ -1193,9 +1602,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
             </div>
 
             <div className="space-y-4 text-xs text-slate-700">
-              <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
-                <span className="font-bold block text-slate-800 mb-1">
-                  Current Outbound Email Status:
+              <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
+                <span className="font-bold block text-slate-800">
+                  Outbound Delivery Configuration:
                 </span>
                 <div className="flex items-center gap-2 font-mono text-xs">
                   <span
@@ -1205,8 +1614,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
                         : 'bg-amber-500'
                     }`}
                   />
-                  <strong>{systemConfig?.outboundProvider || 'Checking...'}</strong>
+                  <span>Active Provider: <strong className="text-slate-900">{systemConfig?.outboundProvider || 'Checking...'}</strong></span>
                 </div>
+                {systemConfig?.fromEmail && (
+                  <div>
+                    <span className="text-slate-500">Sender Address:</span>{' '}
+                    <code className="text-slate-900 font-mono font-bold">{systemConfig.fromEmail}</code>
+                  </div>
+                )}
+                {systemConfig?.domainHint && (
+                  <div className="text-[11px] text-slate-500 bg-white p-2 rounded-lg border border-slate-200">
+                    <span className="font-semibold text-slate-700">Domain Verification:</span> {systemConfig.domainHint}
+                  </div>
+                )}
               </div>
 
               <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-1.5">
@@ -1221,12 +1641,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
               </div>
 
               <div className="p-3.5 bg-teal-50/60 rounded-xl border border-teal-200 text-teal-950 text-[11px] leading-relaxed">
-                <strong>Setting up Outbound Live Emails:</strong>
+                <strong>Automated Email Notification Architecture:</strong>
                 <p className="mt-1">
-                  To send live outbound emails to applicants with real PDF attachments over the internet, specify either <code>RESEND_API_KEY</code> or standard <code>SMTP_HOST</code>/<code>SMTP_USER</code>/<code>SMTP_PASS</code> in your environment variables.
+                  1. <strong>Application Confirmation:</strong> Sent to applicant email upon submission with their Application ID and Pending status.
                 </p>
                 <p className="mt-1">
-                  All notification attempts are tracked with statuses <em>Pending</em>, <em>Sent</em>, or <em>Failed</em> with full error reasons and can be retried at any time from this dashboard.
+                  2. <strong>Support Alert:</strong> Dispatched to <code>{systemConfig?.supportEmail || 'support@companytech.internal'}</code> with full candidate profile details.
+                </p>
+                <p className="mt-1">
+                  3. <strong>Decision Workflows:</strong> Acceptance generates an official PDF offer letter and attaches it. Rejection updates Firestore to Rejected first, then dispatches notification.
+                </p>
+                <p className="mt-1">
+                  4. <strong>Audit & Idempotency:</strong> All dispatches maintain separate Firestore records with real-time delivery tracking (<code>Pending</code>, <code>Sent</code>, <code>Failed</code>) and idempotent resend protection.
                 </p>
               </div>
             </div>

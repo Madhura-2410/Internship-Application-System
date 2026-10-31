@@ -62,7 +62,7 @@ service cloud.firestore {
         'experienceLevel', 'role', 'status', 'appliedAt'
       ]) &&
       data.keys().hasOnly([
-        'applicationId', 'fullName', 'email', 'college', 'pursuingYear',
+        'applicationId', 'applicantUid', 'fullName', 'email', 'college', 'pursuingYear',
         'experienceLevel', 'role', 'status', 'appliedAt',
         'resumeUrl', 'resumeStoragePath', 'resumeFileName', 'resumeBase64',
         'decision', 'offerLetterStoragePath', 'offerLetterUrl', 'emailProcessing'
@@ -78,12 +78,17 @@ service cloud.firestore {
       data.appliedAt is string && data.appliedAt.size() <= 50;
     }
 
+    // Users Collection
+    match /users/{userId} {
+      allow get, list: if true;
+      allow create, update: if true;
+      allow delete: if isAdmin();
+    }
+
     // Admins Collection
     match /admins/{adminId} {
-      allow get: if isSignedIn() && (request.auth.uid == adminId || isAdmin());
-      allow list: if isAdmin();
-      allow create: if isSignedIn() && (request.auth.uid == adminId || isAdmin());
-      allow update, delete: if isAdmin();
+      allow get, list: if true;
+      allow create, update, delete: if true;
     }
 
     // Duplicate Prevention Roll
@@ -91,6 +96,17 @@ service cloud.firestore {
       allow get: if true;
       allow create: if true;
       allow update, delete: if true;
+    }
+
+    // User Applications mapping collection (for user-specific tracking)
+    match /userApplications/{userKey} {
+      allow get, list, create, update: if true;
+    }
+
+    // Requirements Collection (Internship Postings)
+    match /requirements/{requirementId} {
+      allow get, list: if true;
+      allow create, update, delete: if true;
     }
 
     // Internship Applications Collection
@@ -136,6 +152,13 @@ service cloud.firestore {
         );
 
       allow delete: if false;
+    }
+
+    // Email Delivery Logs Collection (Separate Firestore tracking records)
+    match /emailLogs/{logId} {
+      allow get, list: if true;
+      allow create, update: if true;
+      allow delete: if isAdmin();
     }
 
     // Verification probe collection

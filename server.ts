@@ -13,10 +13,12 @@ import {
   query,
   where,
   getDocs,
+  deleteDoc,
 } from './src/server/db.ts';
+import crypto from 'crypto';
 import { EmailService } from './src/server/emailService.ts';
 import { generateOfferLetterPdf } from './src/lib/pdfGenerator.ts';
-import { APPROVED_ROLES, InternshipRole, InternshipApplication } from './src/types/index.ts';
+import { APPROVED_ROLES, InternshipRole, InternshipApplication, InternshipRequirement } from './src/types/index.ts';
 
 dotenv.config();
 
@@ -34,7 +36,13 @@ const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'madhurashekarraju@gmail.com';
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@companytech.internal';
 
 const VALID_ROLES = new Set(APPROVED_ROLES.map((r) => r.id));
-const knownApplicationIds = new Set<string>(['CT-2026-2WFWHF', 'CT-2026-WAP6CW']);
+const knownApplicationIds = new Set<string>([
+  'CT-2026-2WFWHF',
+  'CT-2026-WAP6CW',
+  'CT-2026-V78UY3',
+  'CT-2026-UDSW7P',
+  'CT-2026-FNGAJU',
+]);
 
 function generateApplicationId(): string {
   const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -62,18 +70,402 @@ function cleanUndefined(obj: any): any {
 
 // System configuration endpoint
 app.get('/api/system/config', (req, res) => {
-  const hasResend = !!process.env.RESEND_API_KEY && !process.env.RESEND_API_KEY.includes('MY_');
-  const hasSmtp = !!process.env.SMTP_HOST;
-  const outboundProvider = hasResend ? 'Resend' : hasSmtp ? 'SMTP' : 'Unconfigured';
+  const senderDiagnostics = EmailService.verifySenderConfiguration();
 
   res.json({
     organization: 'Company Tech',
     adminEmail: ADMIN_EMAIL,
     supportEmail: SUPPORT_EMAIL,
-    outboundProvider,
+    outboundProvider: senderDiagnostics.provider,
+    resendConfigured: senderDiagnostics.resendConfigured,
+    fromEmail: senderDiagnostics.fromEmail,
+    domainHint: senderDiagnostics.domainHint,
     rolesCount: APPROVED_ROLES.length,
     timestamp: new Date().toISOString(),
   });
+});
+
+// Known Requirements Set for fast Firestore resolution
+const knownRequirementIds = new Set<string>([
+  'req-frontend-developer',
+  'req-backend-developer',
+  'req-full-stack-developer',
+  'req-ai-ml-engineer',
+  'req-ui-ux-designer',
+  'req-graphic-designer',
+  'req-digital-marketing-intern',
+  'req-social-media-manager',
+  'req-content-writer',
+  'req-business-development-intern',
+  'req-community-manager',
+  'req-hr-intern',
+]);
+
+const INITIAL_REQUIREMENTS: InternshipRequirement[] = APPROVED_ROLES.map((r) => {
+  const reqId = `req-${r.id.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+  return {
+    id: reqId,
+    jobTitle: r.title,
+    department: r.category,
+    description: `${r.description} Work directly alongside senior engineering and product leaders at Company Tech. Engage in agile sprints, technical mentorship, and impactful deliverable milestones.`,
+    requiredSkills: r.id === 'Frontend Developer' ? ['React', 'TypeScript', 'Tailwind CSS', 'Vite', 'HTML/CSS']
+      : r.id === 'Backend Developer' ? ['Node.js', 'Express', 'Cloud Firestore', 'REST APIs', 'TypeScript']
+      : r.id === 'Full-Stack Developer' ? ['React', 'Node.js', 'TypeScript', 'Firestore', 'Tailwind CSS']
+      : r.id === 'AI/ML Engineer' ? ['Python', 'TypeScript', 'Gemini API', 'Machine Learning', 'NLP']
+      : r.id === 'UI/UX Designer' ? ['Figma', 'Wireframing', 'User Research', 'Design Systems', 'Prototyping']
+      : r.id === 'Graphic Designer' ? ['Photoshop', 'Illustrator', 'Figma', 'Visual Design', 'Branding']
+      : r.id === 'Digital Marketing Intern' ? ['SEO', 'Google Analytics', 'Content Marketing', 'Ad Campaigns']
+      : r.id === 'Social Media Manager' ? ['Social Media Strategy', 'Copywriting', 'Canva', 'Community Engagement']
+      : r.id === 'Content Writer' ? ['Technical Writing', 'Copywriting', 'SEO Content', 'Documentation']
+      : r.id === 'Business Development Intern' ? ['Market Research', 'Lead Generation', 'Client Outreach', 'Presentations']
+      : r.id === 'Community Manager' ? ['Discord/Slack Moderation', 'Event Planning', 'Tech Outreach', 'Hackathons']
+      : ['Talent Sourcing', 'Applicant Screening', 'Interview Coordination', 'HR Operations'],
+    eligibilityCriteria: r.eligibility,
+    experienceLevel: 'Both',
+    duration: '1, 2, or 3 Months (Full-Time or Flexible Remote)',
+    openingsCount: 5,
+    location: 'Remote / Hybrid (Bangalore)',
+    applicationDeadline: '2026-12-31',
+    status: 'open',
+    adminUid: 'admin-system-verified',
+    adminEmail: ADMIN_EMAIL,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+});
+
+// Seed requirements in Firestore on bootstrap if needed
+async function ensureRequirementsSeeded() {
+  try {
+    for (const req of INITIAL_REQUIREMENTS) {
+      const ref = doc(serverDb, 'requirements', req.id);
+      const snap = await getDoc(ref);
+      if (!snap.exists()) {
+        await setDoc(ref, cleanUndefined(req));
+        console.log(`[Backend] Seeded requirement ${req.id} in Firestore.`);
+      }
+    }
+  } catch (err) {
+    console.warn('[Backend] Requirement seeding note:', err);
+  }
+}
+// Run non-blocking seed
+ensureRequirementsSeeded();
+
+// Auth: Register User
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { email, password, name, role } = req.body;
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ error: 'A valid email address is required.' });
+    }
+    const normalizedEmail = email.trim().toLowerCase();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(normalizedEmail)) {
+      return res.status(400).json({ error: 'Please enter a valid email format.' });
+    }
+    if (!password || typeof password !== 'string' || password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+    }
+    const cleanName = (name && typeof name === 'string' && name.trim()) || normalizedEmail.split('@')[0];
+
+    const isMasterAdmin = normalizedEmail === ADMIN_EMAIL.toLowerCase();
+
+    // Strict Admin Authorization Check
+    if (role === 'admin' && !isMasterAdmin) {
+      return res.status(403).json({
+        error: `Unauthorized Admin Registration: Only the authorized Company Tech administrator (${ADMIN_EMAIL}) is permitted to register with an Admin role. Please select Employee to apply.`,
+      });
+    }
+
+    const assignedRole = isMasterAdmin ? 'admin' : (role === 'admin' ? 'admin' : 'employee');
+    const userDocId = normalizedEmail.replace(/[^a-zA-Z0-9]/g, '_');
+    const userDocRef = doc(serverDb, 'users', userDocId);
+    const userDocSnap = await getDoc(userDocRef);
+
+    if (userDocSnap.exists()) {
+      return res.status(409).json({
+        error: 'An account with this email address already exists. Please switch to Sign In.',
+      });
+    }
+
+    const salt = crypto.randomBytes(16).toString('hex');
+    const passwordHash = crypto.scryptSync(password, salt, 64).toString('hex');
+    const uid = `ct-user-${crypto.randomBytes(8).toString('hex')}`;
+    const nowIso = new Date().toISOString();
+
+    const userProfile = {
+      uid,
+      email: normalizedEmail,
+      name: cleanName,
+      role: assignedRole,
+      createdAt: nowIso,
+    };
+
+    await setDoc(userDocRef, {
+      ...userProfile,
+      passwordHash,
+      salt,
+      updatedAt: nowIso,
+    });
+
+    if (assignedRole === 'admin') {
+      await setDoc(doc(serverDb, 'admins', uid), {
+        uid,
+        email: normalizedEmail,
+        role: 'admin',
+        createdAt: nowIso,
+      });
+    }
+
+    console.log(`[Backend Auth] Successfully registered ${normalizedEmail} as ${assignedRole}`);
+    return res.status(201).json({
+      success: true,
+      profile: userProfile,
+    });
+  } catch (err: any) {
+    console.error('[Backend Auth] Registration error:', err);
+    return res.status(500).json({ error: `Registration error: ${err.message || String(err)}` });
+  }
+});
+
+// Auth: Login User
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Please enter both your email and password.' });
+    }
+    const normalizedEmail = email.trim().toLowerCase();
+    const userDocId = normalizedEmail.replace(/[^a-zA-Z0-9]/g, '_');
+    const userDocRef = doc(serverDb, 'users', userDocId);
+    const userDocSnap = await getDoc(userDocRef);
+
+    if (!userDocSnap.exists()) {
+      return res.status(401).json({
+        error: 'Invalid credentials. No registered account found with this email. Please check your email or register a new account.',
+      });
+    }
+
+    const userData = userDocSnap.data();
+    if (!userData.passwordHash || !userData.salt) {
+      return res.status(401).json({ error: 'Account credentials not configured for password sign-in.' });
+    }
+
+    const hashToVerify = crypto.scryptSync(password, userData.salt, 64).toString('hex');
+    if (hashToVerify !== userData.passwordHash) {
+      return res.status(401).json({ error: 'Invalid credentials. The password entered is incorrect.' });
+    }
+
+    const isMasterAdmin = normalizedEmail === ADMIN_EMAIL.toLowerCase();
+    const finalRole = isMasterAdmin ? 'admin' : (userData.role || 'employee');
+
+    const profile = {
+      uid: userData.uid || `ct-user-${userDocId}`,
+      email: normalizedEmail,
+      name: userData.name || normalizedEmail.split('@')[0],
+      role: finalRole,
+      createdAt: userData.createdAt || new Date().toISOString(),
+    };
+
+    console.log(`[Backend Auth] Successful login for ${normalizedEmail} (${finalRole})`);
+    return res.json({
+      success: true,
+      profile,
+    });
+  } catch (err: any) {
+    console.error('[Backend Auth] Login error:', err);
+    return res.status(500).json({ error: `Login error: ${err.message || String(err)}` });
+  }
+});
+
+// Requirements: List All Requirements (Open for applicants, All for Admin)
+app.get('/api/requirements', async (req, res) => {
+  try {
+    await ensureRequirementsSeeded();
+    const results: any[] = [];
+
+    // Count applications by role
+    const applicationCounts: Record<string, number> = {};
+    for (const id of knownApplicationIds) {
+      try {
+        const snap = await getDoc(doc(serverDb, 'internshipApplications', id));
+        if (snap.exists()) {
+          const app = snap.data();
+          if (app.role) {
+            applicationCounts[app.role] = (applicationCounts[app.role] || 0) + 1;
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    for (const id of knownRequirementIds) {
+      try {
+        const snap = await getDoc(doc(serverDb, 'requirements', id));
+        if (snap.exists()) {
+          const data = snap.data() as InternshipRequirement;
+          const count = applicationCounts[data.jobTitle] || 0;
+          results.push({ ...data, applicationCount: count });
+        }
+      } catch (e) {
+        console.warn(`[Backend] Could not fetch requirement ${id}:`, e);
+      }
+    }
+
+    // Sort: open first, then by createdAt desc
+    results.sort((a, b) => {
+      if (a.status !== b.status) {
+        return a.status === 'open' ? -1 : 1;
+      }
+      return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+    });
+
+    return res.json({
+      count: results.length,
+      requirements: results,
+    });
+  } catch (err: any) {
+    console.error('[Backend] Failed to load requirements:', err);
+    return res.status(500).json({ error: 'Failed to retrieve requirements.' });
+  }
+});
+
+// Requirements: Post New Requirement (Admin Only)
+app.post('/api/requirements', async (req, res) => {
+  try {
+    const authCheck = verifyAdminAuthorization(req);
+    if (!authCheck.authorized) {
+      return res.status(403).json({ error: 'Unauthorized: Admin privileges required to post requirements.' });
+    }
+
+    const {
+      jobTitle,
+      department,
+      description,
+      requiredSkills,
+      eligibilityCriteria,
+      experienceLevel,
+      duration,
+      openingsCount,
+      location,
+      applicationDeadline,
+      status,
+    } = req.body;
+
+    if (!jobTitle || typeof jobTitle !== 'string' || jobTitle.trim().length < 2) {
+      return res.status(400).json({ error: 'Job title is required.' });
+    }
+    if (!department || typeof department !== 'string') {
+      return res.status(400).json({ error: 'Department is required.' });
+    }
+    if (!description || typeof description !== 'string' || description.trim().length < 10) {
+      return res.status(400).json({ error: 'A descriptive job overview is required (at least 10 characters).' });
+    }
+
+    const cleanTitle = jobTitle.trim();
+    const reqId = `req-${cleanTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${Date.now().toString().slice(-4)}`;
+    const nowIso = new Date().toISOString();
+
+    const skillsArray = Array.isArray(requiredSkills)
+      ? requiredSkills.map((s: any) => String(s).trim()).filter(Boolean)
+      : typeof requiredSkills === 'string'
+      ? requiredSkills.split(',').map((s) => s.trim()).filter(Boolean)
+      : ['Problem Solving', 'Teamwork'];
+
+    const newRequirement: InternshipRequirement = {
+      id: reqId,
+      jobTitle: cleanTitle,
+      department: department.trim(),
+      description: description.trim(),
+      requiredSkills: skillsArray,
+      eligibilityCriteria: (eligibilityCriteria && String(eligibilityCriteria).trim()) || 'Open to all students and recent graduates.',
+      experienceLevel: ['Fresher', 'Experienced', 'Both'].includes(experienceLevel) ? experienceLevel : 'Both',
+      duration: (duration && String(duration).trim()) || '1, 2, or 3 Months',
+      openingsCount: Math.max(1, Number(openingsCount) || 5),
+      location: (location && String(location).trim()) || 'Remote',
+      applicationDeadline: (applicationDeadline && String(applicationDeadline).trim()) || '2026-12-31',
+      status: status === 'closed' ? 'closed' : 'open',
+      adminUid: 'admin-system-verified',
+      adminEmail: authCheck.email || ADMIN_EMAIL,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    await setDoc(doc(serverDb, 'requirements', reqId), cleanUndefined(newRequirement));
+    knownRequirementIds.add(reqId);
+    console.log(`[Backend] Admin published new requirement: ${reqId} (${cleanTitle})`);
+
+    return res.status(201).json({
+      success: true,
+      requirement: newRequirement,
+    });
+  } catch (err: any) {
+    console.error('[Backend] Failed to post requirement:', err);
+    return res.status(500).json({ error: `Failed to post requirement: ${err.message || String(err)}` });
+  }
+});
+
+// Requirements: Update Requirement (Admin Only)
+app.put('/api/requirements/:id', async (req, res) => {
+  try {
+    const authCheck = verifyAdminAuthorization(req);
+    if (!authCheck.authorized) {
+      return res.status(403).json({ error: 'Unauthorized: Admin privileges required to update requirements.' });
+    }
+
+    const { id } = req.params;
+    const reqRef = doc(serverDb, 'requirements', id);
+    const reqSnap = await getDoc(reqRef);
+
+    if (!reqSnap.exists()) {
+      return res.status(404).json({ error: `Requirement ${id} not found.` });
+    }
+
+    const existing = reqSnap.data() as InternshipRequirement;
+    const updates = { ...req.body, updatedAt: new Date().toISOString() };
+    delete updates.id; // immutable
+
+    if (updates.requiredSkills && typeof updates.requiredSkills === 'string') {
+      updates.requiredSkills = updates.requiredSkills.split(',').map((s: string) => s.trim()).filter(Boolean);
+    }
+    if (updates.openingsCount) {
+      updates.openingsCount = Math.max(1, Number(updates.openingsCount) || 1);
+    }
+
+    const updated = { ...existing, ...updates };
+    await setDoc(reqRef, cleanUndefined(updated));
+    console.log(`[Backend] Admin updated requirement ${id}. Status: ${updated.status}`);
+
+    return res.json({
+      success: true,
+      requirement: updated,
+    });
+  } catch (err: any) {
+    console.error('[Backend] Update requirement error:', err);
+    return res.status(500).json({ error: `Update failed: ${err.message || String(err)}` });
+  }
+});
+
+// Requirements: Delete Requirement (Admin Only)
+app.delete('/api/requirements/:id', async (req, res) => {
+  try {
+    const authCheck = verifyAdminAuthorization(req);
+    if (!authCheck.authorized) {
+      return res.status(403).json({ error: 'Unauthorized: Admin privileges required to delete requirements.' });
+    }
+
+    const { id } = req.params;
+    await deleteDoc(doc(serverDb, 'requirements', id));
+    knownRequirementIds.delete(id);
+    console.log(`[Backend] Admin deleted requirement ${id}`);
+
+    return res.json({ success: true, id });
+  } catch (err: any) {
+    console.error('[Backend] Delete requirement error:', err);
+    return res.status(500).json({ error: `Delete failed: ${err.message || String(err)}` });
+  }
 });
 
 // 1. Submit Application
@@ -88,6 +480,7 @@ app.post('/api/applications/submit', async (req, res) => {
       role,
       resumeFileName,
       resumeBase64,
+      applicantUid,
     } = req.body;
 
     // Strict Server-side Validation
@@ -179,6 +572,9 @@ app.post('/api/applications/submit', async (req, res) => {
     }
     if (resumeBase64) {
       applicationRecord.resumeBase64 = resumeBase64;
+    }
+    if (applicantUid && typeof applicantUid === 'string') {
+      applicationRecord.applicantUid = applicantUid.trim();
     }
 
     // Save to Cloud Firestore
@@ -273,6 +669,48 @@ app.get('/api/applications/track', async (req, res) => {
   } catch (error: any) {
     console.error('[Backend] Track status error:', error);
     return res.status(500).json({ error: 'Failed to retrieve application record.' });
+  }
+});
+
+// 2b. Retrieve Applications for Current Authenticated User
+app.get('/api/applications/my-applications', async (req, res) => {
+  try {
+    const { email, uid } = req.query;
+
+    if (!email && !uid) {
+      return res.status(400).json({ error: 'User identifier (email or uid) is required.' });
+    }
+
+    const normalizedEmail = email ? String(email).trim().toLowerCase() : '';
+    const targetUid = uid ? String(uid).trim() : '';
+
+    const myApps: InternshipApplication[] = [];
+    for (const id of knownApplicationIds) {
+      try {
+        const snap = await getDoc(doc(serverDb, 'internshipApplications', id));
+        if (snap.exists()) {
+          const app = snap.data() as InternshipApplication;
+          const matchEmail = normalizedEmail && app.email.toLowerCase() === normalizedEmail;
+          const matchUid = targetUid && app.applicantUid === targetUid;
+          if (matchEmail || matchUid) {
+            myApps.push(app);
+          }
+        }
+      } catch (e) {
+        console.warn(`[Backend] Could not check app ${id}:`, e);
+      }
+    }
+
+    // Sort descending by appliedAt
+    myApps.sort((a, b) => new Date(b.appliedAt).getTime() - new Date(a.appliedAt).getTime());
+
+    return res.json({
+      count: myApps.length,
+      applications: myApps,
+    });
+  } catch (error: any) {
+    console.error('[Backend] Failed to load my-applications:', error);
+    return res.status(500).json({ error: 'Failed to retrieve applications.' });
   }
 });
 
@@ -498,7 +936,22 @@ app.post('/api/applications/:id/decision', async (req, res) => {
         notes: notes || '',
       };
 
-      // Dispatch rejection email
+      // 1. Atomically update application status in Firestore FIRST before processing notification
+      await updateDoc(docRef, cleanUndefined({
+        status: 'Rejected',
+        decision: cleanUndefined(decisionMetadata),
+      }));
+
+      const rollKey = `${appData.email.replace(/[^a-zA-Z0-9]/g, '_')}__${appData.role.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      try {
+        await updateDoc(doc(serverDb, 'applicationRoll', rollKey), { status: 'Rejected' });
+      } catch (e) {
+        console.warn('Roll update note:', e);
+      }
+
+      console.log(`[Backend] Application ${id} status successfully updated to Rejected in Firestore. Processing notification...`);
+
+      // 2. Dispatch predefined professional rejection email
       const emailResult = await EmailService.sendRejectionEmail(appData, rejectionReason);
 
       const emailProcessing = {
@@ -512,21 +965,12 @@ app.post('/api/applications/:id/decision', async (req, res) => {
         },
       };
 
-      // Atomically update in Firestore
+      // 3. Record updated delivery tracking in Firestore
       await updateDoc(docRef, cleanUndefined({
-        status: 'Rejected',
-        decision: cleanUndefined(decisionMetadata),
         emailProcessing: cleanUndefined(emailProcessing),
       }));
 
-      const rollKey = `${appData.email.replace(/[^a-zA-Z0-9]/g, '_')}__${appData.role.replace(/[^a-zA-Z0-9]/g, '_')}`;
-      try {
-        await updateDoc(doc(serverDb, 'applicationRoll', rollKey), { status: 'Rejected' });
-      } catch (e) {
-        console.warn('Roll update note:', e);
-      }
-
-      console.log(`[Backend] Application ${id} rejected. Email status: ${emailResult.status}.`);
+      console.log(`[Backend] Application ${id} rejection notification completed. Status: ${emailResult.status}.`);
 
       return res.json({
         success: true,
@@ -543,7 +987,7 @@ app.post('/api/applications/:id/decision', async (req, res) => {
   }
 });
 
-// 5. Retry Notification / PDF Generation for Failed Operations
+// 5. Retry Notification / PDF Generation for Failed Operations with Idempotency Guard
 app.post('/api/applications/:id/retry', async (req, res) => {
   try {
     const authCheck = verifyAdminAuthorization(req);
@@ -552,7 +996,11 @@ app.post('/api/applications/:id/retry', async (req, res) => {
     }
 
     const { id } = req.params;
-    const { target } = req.body; // 'applicantConfirmation' | 'supportNotification' | 'decisionEmail'
+    const { target, force } = req.body; // 'applicantConfirmation' | 'supportNotification' | 'decisionEmail'
+
+    if (!['applicantConfirmation', 'supportNotification', 'decisionEmail'].includes(target)) {
+      return res.status(400).json({ error: 'Invalid retry target specified.' });
+    }
 
     const docRef = doc(serverDb, 'internshipApplications', id);
     const docSnap = await getDoc(docRef);
@@ -563,10 +1011,24 @@ app.post('/api/applications/:id/retry', async (req, res) => {
 
     const appData = docSnap.data() as InternshipApplication;
     const emailProcessing = { ...appData.emailProcessing };
+
+    // Idempotency check: If email has already been successfully delivered and no explicit force resend requested
+    const currentTargetStatus = (emailProcessing as any)[target]?.status;
+    if (currentTargetStatus === 'Sent' && !force) {
+      return res.json({
+        success: true,
+        status: 'Sent',
+        target,
+        alreadySent: true,
+        message: 'This notification has already been successfully delivered. Pass force: true to re-send intentionally.',
+        emailProcessing,
+      });
+    }
+
     let dispatchResult: any = null;
 
     if (target === 'applicantConfirmation') {
-      dispatchResult = await EmailService.sendApplicantConfirmationEmail(appData);
+      dispatchResult = await EmailService.sendApplicantConfirmationEmail(appData, !!force);
       emailProcessing.applicantConfirmation = {
         status: dispatchResult.status,
         lastAttemptAt: dispatchResult.timestamp,
@@ -575,7 +1037,7 @@ app.post('/api/applications/:id/retry', async (req, res) => {
         messageId: dispatchResult.messageId,
       };
     } else if (target === 'supportNotification') {
-      dispatchResult = await EmailService.sendSupportNotificationEmail(appData);
+      dispatchResult = await EmailService.sendSupportNotificationEmail(appData, !!force);
       emailProcessing.supportNotification = {
         status: dispatchResult.status,
         lastAttemptAt: dispatchResult.timestamp,
@@ -599,10 +1061,11 @@ app.post('/api/applications/:id/retry', async (req, res) => {
           appData,
           pdfBuffer,
           appData.decision.duration || '1 month',
-          appData.decision.joiningDate || ''
+          appData.decision.joiningDate || '',
+          !!force
         );
       } else if (appData.status === 'Rejected') {
-        dispatchResult = await EmailService.sendRejectionEmail(appData, appData.decision?.rejectionReason);
+        dispatchResult = await EmailService.sendRejectionEmail(appData, appData.decision?.rejectionReason, !!force);
       } else {
         return res.status(400).json({ error: 'Cannot retry decision email for a Pending application.' });
       }
@@ -614,8 +1077,6 @@ app.post('/api/applications/:id/retry', async (req, res) => {
         provider: dispatchResult.provider,
         messageId: dispatchResult.messageId,
       };
-    } else {
-      return res.status(400).json({ error: 'Invalid retry target specified.' });
     }
 
     await updateDoc(docRef, cleanUndefined({ emailProcessing }));
@@ -630,6 +1091,39 @@ app.post('/api/applications/:id/retry', async (req, res) => {
   } catch (error: any) {
     console.error('[Backend] Retry error:', error);
     return res.status(500).json({ error: `Retry failed: ${error.message || String(error)}` });
+  }
+});
+
+// 6. Admin Email Delivery Logs (Separate Firestore records)
+app.get('/api/admin/email-logs', async (req, res) => {
+  try {
+    const authCheck = verifyAdminAuthorization(req);
+    if (!authCheck.authorized) {
+      return res.status(403).json({ error: 'Unauthorized: Admin privileges required.' });
+    }
+
+    const { applicationId } = req.query;
+    const logsRef = collection(serverDb, 'emailLogs');
+    let q = query(logsRef);
+    if (applicationId && typeof applicationId === 'string') {
+      q = query(logsRef, where('applicationId', '==', applicationId.trim()));
+    }
+
+    const snap = await getDocs(q);
+    const logs: any[] = [];
+    snap.forEach((d) => {
+      logs.push(d.data());
+    });
+
+    logs.sort((a, b) => new Date(b.lastAttemptAt || 0).getTime() - new Date(a.lastAttemptAt || 0).getTime());
+
+    return res.json({
+      count: logs.length,
+      logs,
+    });
+  } catch (err: any) {
+    console.error('[Backend] Failed to load email-logs:', err);
+    return res.status(500).json({ error: 'Failed to retrieve email delivery logs.' });
   }
 });
 

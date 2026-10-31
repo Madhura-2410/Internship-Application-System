@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Search,
   CheckCircle2,
@@ -6,293 +6,453 @@ import {
   XCircle,
   FileDown,
   AlertCircle,
-  Building,
   Calendar,
   Layers,
   Award,
+  FileText,
+  RotateCcw,
+  ArrowRight,
+  Briefcase,
+  Eye,
+  X,
+  Building,
 } from 'lucide-react';
+import { InternshipApplication } from '../types';
 import { downloadOfferLetterPdf } from '../lib/pdfGenerator';
 
 interface StatusTrackerProps {
+  userEmail: string;
+  userUid: string;
   initialApplicationId?: string;
-  initialEmail?: string;
+  onBrowseRoles?: () => void;
 }
 
 export const StatusTracker: React.FC<StatusTrackerProps> = ({
+  userEmail,
+  userUid,
   initialApplicationId = '',
-  initialEmail = '',
+  onBrowseRoles,
 }) => {
-  const [appId, setAppId] = useState(initialApplicationId);
-  const [email, setEmail] = useState(initialEmail);
-  const [loading, setLoading] = useState(false);
+  const [myApplications, setMyApplications] = useState<InternshipApplication[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [record, setRecord] = useState<any | null>(null);
 
-  // Auto-search if initialApplicationId is supplied
-  React.useEffect(() => {
-    if (initialApplicationId) {
-      setAppId(initialApplicationId);
-      if (initialEmail) setEmail(initialEmail);
-      performSearch(initialApplicationId, initialEmail);
-    }
-  }, [initialApplicationId, initialEmail]);
+  // Selected application for detail view modal
+  const [selectedApp, setSelectedApp] = useState<InternshipApplication | null>(null);
 
-  const performSearch = async (idToSearch: string, emailToSearch: string) => {
-    if (!idToSearch.trim()) {
-      setError('Please enter your Application ID.');
-      return;
-    }
+  // Manual lookup state
+  const [manualId, setManualId] = useState(initialApplicationId);
+  const [manualSearching, setManualSearching] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
 
+  // Fetch applications belonging to this authenticated user
+  const fetchMyApplications = async () => {
+    if (!userEmail && !userUid) return;
     setLoading(true);
     setError(null);
-    setRecord(null);
 
     try {
-      const params = new URLSearchParams({ applicationId: idToSearch.trim() });
-      if (emailToSearch.trim()) {
-        params.append('email', emailToSearch.trim().toLowerCase());
-      }
+      const params = new URLSearchParams();
+      if (userEmail) params.append('email', userEmail.trim().toLowerCase());
+      if (userUid) params.append('uid', userUid.trim());
 
-      const res = await fetch(`/api/applications/track?${params.toString()}`);
-      const data = await res.json();
-
+      const res = await fetch(`/api/applications/my-applications?${params.toString()}`);
       if (!res.ok) {
-        setError(data.error || 'Unable to locate application record.');
-        return;
+        throw new Error('Failed to retrieve your application records.');
       }
 
-      setRecord(data);
+      const data = await res.json();
+      const apps: InternshipApplication[] = data.applications || [];
+      setMyApplications(apps);
+
+      // If initialApplicationId was passed, auto-select it in detail view
+      if (initialApplicationId) {
+        const found = apps.find((a) => a.applicationId === initialApplicationId);
+        if (found) {
+          setSelectedApp(found);
+        }
+      }
     } catch (err: any) {
-      console.error('Track error:', err);
-      setError('Failed to reach the admissions server. Please check your network.');
+      console.error('Fetch my-applications error:', err);
+      setError(err.message || 'Error loading applications from Firestore.');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleSearchSubmit = (e: React.FormEvent) => {
+  useEffect(() => {
+    fetchMyApplications();
+  }, [userEmail, userUid]);
+
+  // Handle Manual Application ID Search
+  const handleManualSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-    performSearch(appId, email);
+    if (!manualId.trim()) return;
+
+    setManualSearching(true);
+    setManualError(null);
+
+    try {
+      const res = await fetch(`/api/applications/track?applicationId=${encodeURIComponent(manualId.trim())}&email=${encodeURIComponent(userEmail)}`);
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Application record not found.');
+      }
+
+      setSelectedApp(data);
+    } catch (err: any) {
+      console.error('Manual search error:', err);
+      setManualError(err.message || 'Could not find application record.');
+    } finally {
+      setManualSearching(false);
+    }
   };
 
-  const handleDownloadOfferLetter = () => {
-    if (!record) return;
-    if (record.offerLetterUrl && record.offerLetterUrl.startsWith('data:application/pdf')) {
+  // Download Offer Letter
+  const handleDownloadOfferLetter = (app: InternshipApplication) => {
+    if (app.offerLetterUrl && app.offerLetterUrl.startsWith('data:application/pdf')) {
       const link = document.createElement('a');
-      link.href = record.offerLetterUrl;
-      link.download = `Company_Tech_Offer_Letter_${record.applicationId}.pdf`;
+      link.href = app.offerLetterUrl;
+      link.download = `Company_Tech_Offer_Letter_${app.applicationId}.pdf`;
       link.click();
     } else {
-      // Fallback: Generate fresh PDF client-side using record details
       downloadOfferLetterPdf({
-        applicationId: record.applicationId,
-        fullName: record.fullName,
-        email: email || record.email || '',
-        college: record.college || 'Candidate University',
-        role: record.role,
-        duration: record.decision?.duration || '1 month',
-        joiningDate: record.decision?.joiningDate || 'Immediate',
+        applicationId: app.applicationId,
+        fullName: app.fullName,
+        email: app.email,
+        college: app.college,
+        role: app.role,
+        duration: app.decision?.duration || '1 month',
+        joiningDate: app.decision?.joiningDate || 'Immediate',
       });
     }
   };
 
   return (
-    <div className="max-w-3xl mx-auto my-12 px-4 sm:px-6">
-      <div className="text-center mb-8">
-        <span className="text-xs font-bold uppercase tracking-wider text-teal-700 bg-teal-50 px-3 py-1 rounded-full border border-teal-200">
-          Applicant Status Tracking
-        </span>
-        <h1 className="text-3xl font-extrabold text-slate-900 mt-3 tracking-tight">
-          Track Your Application Status
-        </h1>
-        <p className="text-slate-600 text-sm mt-2 max-w-lg mx-auto">
-          Enter your unique Application ID to inspect live admissions committee decisions, timestamps, and offer documents.
-        </p>
-      </div>
-
-      {/* Search Card */}
-      <form
-        onSubmit={handleSearchSubmit}
-        className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs mb-8"
-      >
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Application ID <span className="text-rose-500">*</span>
-            </label>
-            <input
-              type="text"
-              required
-              value={appId}
-              onChange={(e) => setAppId(e.target.value)}
-              placeholder="e.g. CT-2026-X9K2L1"
-              className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-600 text-sm font-mono uppercase"
-            />
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 min-h-[85vh]">
+      {/* Page Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-200 mb-8">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-teal-700 bg-teal-50 px-2.5 py-0.5 rounded-full border border-teal-200">
+              Candidate Dashboard
+            </span>
+            <span className="text-xs text-slate-500 font-mono">
+              Live Firestore Records
+            </span>
           </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Registered Email (Optional verification)
-            </label>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="e.g. alex@university.edu"
-              className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-600 text-sm"
-            />
-          </div>
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 mt-1">
+            Track Application Status
+          </h1>
+          <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
+            Registered account: <strong className="text-slate-800">{userEmail}</strong>
+          </p>
         </div>
 
-        <div className="mt-4 flex justify-end">
+        <div className="flex items-center gap-2">
           <button
-            type="submit"
+            onClick={fetchMyApplications}
             disabled={loading}
-            className="px-6 py-2.5 rounded-xl bg-slate-900 text-white text-xs font-bold hover:bg-slate-800 transition-colors flex items-center gap-2 shadow-xs disabled:opacity-50"
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-900 text-white text-xs font-bold hover:bg-slate-800 transition-colors shadow-xs disabled:opacity-50"
           >
-            {loading ? (
-              <>
-                <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                <span>Searching Records...</span>
-              </>
-            ) : (
-              <>
-                <Search className="w-3.5 h-3.5" />
-                <span>Check Live Status</span>
-              </>
-            )}
+            <RotateCcw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            <span>Refresh Status</span>
           </button>
         </div>
-      </form>
+      </div>
 
-      {/* Error state */}
-      {error && (
-        <div className="bg-rose-50 border border-rose-200 rounded-2xl p-5 mb-8 flex items-start gap-3 text-rose-900 text-sm">
-          <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
-          <div>
-            <h4 className="font-bold">Record Lookup Notice</h4>
-            <p className="mt-0.5">{error}</p>
+      {/* Main Content Area */}
+      {loading ? (
+        <div className="p-16 text-center text-slate-500 bg-white rounded-2xl border border-slate-200">
+          <div className="w-8 h-8 border-3 border-slate-200 border-t-slate-800 rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-xs font-semibold">Retrieving your submitted applications...</p>
+        </div>
+      ) : error ? (
+        <div className="p-10 text-center text-rose-800 bg-white rounded-2xl border border-rose-200">
+          <AlertCircle className="w-8 h-8 text-rose-600 mx-auto mb-2" />
+          <p className="font-bold text-sm">Failed to Load Applications</p>
+          <p className="text-xs text-slate-600 mt-1">{error}</p>
+          <button
+            onClick={fetchMyApplications}
+            className="mt-4 px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold"
+          >
+            Retry
+          </button>
+        </div>
+      ) : myApplications.length === 0 ? (
+        /* Empty State */
+        <div className="bg-white rounded-2xl border border-slate-200 p-10 sm:p-14 text-center max-w-2xl mx-auto shadow-xs">
+          <div className="w-14 h-14 bg-slate-100 rounded-2xl flex items-center justify-center mx-auto mb-4 text-slate-600">
+            <Briefcase className="w-7 h-7 text-teal-600" />
+          </div>
+          <h3 className="text-lg font-bold text-slate-900">
+            No Applications Submitted Yet
+          </h3>
+          <p className="text-xs sm:text-sm text-slate-500 mt-2 max-w-md mx-auto leading-relaxed">
+            You haven't submitted any internship applications under <strong>{userEmail}</strong>. Browse our 12 approved internship tracks to apply today!
+          </p>
+          {onBrowseRoles && (
+            <button
+              onClick={onBrowseRoles}
+              className="mt-6 px-6 py-2.5 bg-slate-900 hover:bg-teal-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs inline-flex items-center gap-2"
+            >
+              <span>Explore Open Roles</span>
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      ) : (
+        /* List of Applications */
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            {myApplications.map((app) => {
+              const isAccepted = app.status === 'Accepted';
+              const isRejected = app.status === 'Rejected';
+              const isPending = app.status === 'Pending';
+
+              return (
+                <div
+                  key={app.applicationId}
+                  className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-xs hover:shadow-md transition-all flex flex-col justify-between"
+                >
+                  <div>
+                    {/* Top Row: Application ID & Status Badge */}
+                    <div className="flex items-center justify-between mb-3">
+                      <span className="font-mono text-xs font-extrabold text-slate-900 bg-slate-100 px-2.5 py-1 rounded-md">
+                        {app.applicationId}
+                      </span>
+
+                      {isPending && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300">
+                          <Clock className="w-3 h-3 text-amber-600 animate-pulse" />
+                          <span>Pending Review</span>
+                        </span>
+                      )}
+                      {isAccepted && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-300">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                          <span>Accepted</span>
+                        </span>
+                      )}
+                      {isRejected && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-300">
+                          <XCircle className="w-3 h-3 text-slate-500" />
+                          <span>Concluded</span>
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Role Title */}
+                    <h3 className="font-bold text-base text-slate-900 mb-1">
+                      {app.role}
+                    </h3>
+                    <p className="text-xs text-slate-500 mb-3 truncate">
+                      {app.college} • {app.pursuingYear}
+                    </p>
+
+                    {/* Applied Date */}
+                    <div className="text-[11px] text-slate-400 mb-4 flex items-center gap-1.5">
+                      <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                      <span>Applied: {new Date(app.appliedAt).toLocaleDateString()}</span>
+                    </div>
+
+                    {/* Acceptance Highlight */}
+                    {isAccepted && app.decision && (
+                      <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 text-xs text-emerald-950 mb-4 space-y-1">
+                        <div className="font-bold flex items-center gap-1 text-emerald-900">
+                          <Award className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Offer Extended ({app.decision.duration})</span>
+                        </div>
+                        <div className="text-[11px] text-emerald-800">
+                          Joining Date: <strong>{app.decision.joiningDate}</strong>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Action Buttons: View Status & Download Offer if Accepted */}
+                  <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+                    <button
+                      onClick={() => setSelectedApp(app)}
+                      className="w-full py-2 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs transition-colors flex items-center justify-center gap-1.5 shadow-2xs"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>View Status</span>
+                    </button>
+
+                    {isAccepted && (
+                      <button
+                        onClick={() => handleDownloadOfferLetter(app)}
+                        className="py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition-colors flex items-center justify-center gap-1.5 shadow-2xs shrink-0"
+                        title="Download Offer Letter (PDF)"
+                      >
+                        <FileDown className="w-3.5 h-3.5" />
+                        <span>PDF</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
 
-      {/* Results Display */}
-      {record && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-6 sm:p-8 shadow-sm space-y-6">
-          {/* Header */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-100">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-xl font-extrabold text-slate-900">
-                  {record.applicationId}
-                </span>
-                <span className="text-[11px] font-semibold text-slate-500 bg-slate-100 px-2 py-0.5 rounded">
-                  Company Tech
-                </span>
-              </div>
-              <h2 className="text-base font-bold text-slate-800 mt-1">
-                {record.fullName} • {record.role}
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                {record.college} • Applied: {new Date(record.appliedAt).toLocaleDateString()}
-              </p>
+      {/* Manual Search Section (for looking up by ID if required) */}
+      <div className="mt-12 bg-white rounded-2xl border border-slate-200 p-6 shadow-xs max-w-xl mx-auto">
+        <h4 className="font-bold text-xs uppercase tracking-wider text-slate-400 mb-2">
+          Manual Application Lookup
+        </h4>
+        <p className="text-xs text-slate-600 mb-4">
+          Need to search for an application submitted with an external reference ID? Enter it below:
+        </p>
+        <form onSubmit={handleManualSearch} className="flex gap-2">
+          <input
+            type="text"
+            value={manualId}
+            onChange={(e) => setManualId(e.target.value)}
+            placeholder="e.g. CT-2026-X9K2L1"
+            className="flex-1 px-3.5 py-2 text-xs rounded-xl border border-slate-300 font-mono uppercase focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-600"
+          />
+          <button
+            type="submit"
+            disabled={manualSearching}
+            className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors shrink-0 disabled:opacity-50"
+          >
+            {manualSearching ? 'Searching...' : 'Search'}
+          </button>
+        </form>
+        {manualError && (
+          <p className="text-xs text-rose-600 mt-2 font-medium">{manualError}</p>
+        )}
+      </div>
+
+      {/* DETAILED STATUS MODAL */}
+      {selectedApp && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl border border-slate-200 max-w-xl w-full p-6 sm:p-7 shadow-2xl relative max-h-[90vh] overflow-y-auto">
+            <button
+              onClick={() => setSelectedApp(null)}
+              className="absolute top-4 right-4 text-slate-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-slate-100 transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            {/* Header */}
+            <div className="flex items-center gap-2 mb-2">
+              <span className="font-mono text-sm font-extrabold text-slate-900 bg-slate-100 px-2.5 py-1 rounded">
+                {selectedApp.applicationId}
+              </span>
+              <span className="text-[10px] font-semibold text-slate-500 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
+                Company Tech Admissions
+              </span>
             </div>
 
-            {/* Status Badge */}
-            <div>
-              {record.status === 'Accepted' ? (
-                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-emerald-50 border border-emerald-300 text-emerald-800 font-bold text-xs">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  <span>Application Accepted</span>
+            <h2 className="text-xl font-bold text-slate-900">
+              {selectedApp.role} Internship
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Candidate: <strong>{selectedApp.fullName}</strong> • Applied: {new Date(selectedApp.appliedAt).toLocaleDateString()}
+            </p>
+
+            {/* Status Section */}
+            <div className="my-5">
+              {selectedApp.status === 'Accepted' && (
+                <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-5 text-emerald-950 space-y-4">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+                      <Award className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-base text-emerald-950">
+                        Application Accepted & Offer Extended!
+                      </h3>
+                      <p className="text-xs text-emerald-800 mt-0.5 leading-relaxed">
+                        Congratulations! The Company Tech admissions panel has accepted your candidacy for the {selectedApp.role} cohort.
+                      </p>
+                    </div>
+                  </div>
+
+                  {selectedApp.decision && (
+                    <div className="grid grid-cols-2 gap-3 pt-3 border-t border-emerald-200/60 text-xs">
+                      <div>
+                        <span className="text-emerald-800 font-semibold block text-[11px]">Duration:</span>
+                        <span className="font-bold text-emerald-950 text-sm">{selectedApp.decision.duration}</span>
+                      </div>
+                      <div>
+                        <span className="text-emerald-800 font-semibold block text-[11px]">Joining Date:</span>
+                        <span className="font-bold text-emerald-950 text-sm">{selectedApp.decision.joiningDate}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="pt-2">
+                    <button
+                      onClick={() => handleDownloadOfferLetter(selectedApp)}
+                      className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center justify-center gap-2"
+                    >
+                      <FileDown className="w-4 h-4" />
+                      <span>Download Official Offer Letter (PDF)</span>
+                    </button>
+                  </div>
                 </div>
-              ) : record.status === 'Rejected' ? (
-                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-100 border border-slate-300 text-slate-700 font-bold text-xs">
-                  <XCircle className="w-4 h-4 text-slate-500" />
-                  <span>Application Concluded</span>
+              )}
+
+              {selectedApp.status === 'Pending' && (
+                <div className="bg-amber-50/80 border border-amber-200 rounded-2xl p-5 text-amber-950 space-y-2 text-xs">
+                  <h4 className="font-bold text-sm text-amber-900 flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-amber-600" />
+                    <span>Review in Progress</span>
+                  </h4>
+                  <p className="leading-relaxed text-amber-900/90">
+                    Your application is currently being evaluated by our engineering and recruitment leadership. Once a decision is reached, you will be notified via email and this status dashboard will be updated instantly.
+                  </p>
                 </div>
-              ) : (
-                <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-50 border border-amber-300 text-amber-800 font-bold text-xs">
-                  <Clock className="w-4 h-4 text-amber-600 animate-pulse" />
-                  <span>Pending Technical Review</span>
+              )}
+
+              {selectedApp.status === 'Rejected' && (
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 text-slate-700 space-y-2 text-xs">
+                  <h4 className="font-bold text-sm text-slate-900 flex items-center gap-2">
+                    <XCircle className="w-4 h-4 text-slate-500" />
+                    <span>Application Cycle Concluded</span>
+                  </h4>
+                  <p className="leading-relaxed">
+                    Thank you for your interest in Company Tech. While we were unable to extend an offer for this cohort due to competitive applicant volume, your profile remains in our talent database for future consideration.
+                  </p>
                 </div>
               )}
             </div>
+
+            {/* Profile Overview */}
+            <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 text-xs grid grid-cols-2 gap-3 mb-5">
+              <div>
+                <span className="text-slate-400 block text-[11px]">College / University</span>
+                <span className="font-semibold text-slate-800">{selectedApp.college}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block text-[11px]">Academic Year</span>
+                <span className="font-semibold text-slate-800">{selectedApp.pursuingYear}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block text-[11px]">Experience Level</span>
+                <span className="font-semibold text-slate-800">{selectedApp.experienceLevel}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block text-[11px]">Signatory</span>
+                <span className="font-semibold text-slate-800">HR Support and Co-Founder</span>
+              </div>
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                onClick={() => setSelectedApp(null)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-colors"
+              >
+                Close
+              </button>
+            </div>
           </div>
-
-          {/* Detailed Decision Information */}
-          {record.status === 'Accepted' && (
-            <div className="space-y-5">
-              <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-5">
-                <div className="flex items-start gap-3">
-                  <Award className="w-6 h-6 text-emerald-600 shrink-0 mt-0.5" />
-                  <div>
-                    <h3 className="font-bold text-emerald-950 text-base">
-                      Offer of Internship Extended!
-                    </h3>
-                    <p className="text-xs text-emerald-900 mt-1 leading-relaxed">
-                      Congratulations! The Company Tech admissions committee has accepted your application for the <strong>{record.role}</strong> track.
-                    </p>
-                  </div>
-                </div>
-
-                {record.decision && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4 pt-4 border-t border-emerald-200/60 text-xs">
-                    <div>
-                      <span className="text-emerald-800 font-semibold block">Internship Duration:</span>
-                      <span className="font-bold text-emerald-950 text-sm">{record.decision.duration}</span>
-                    </div>
-                    <div>
-                      <span className="text-emerald-800 font-semibold block">Joining Date:</span>
-                      <span className="font-bold text-emerald-950 text-sm">{record.decision.joiningDate}</span>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Offer Letter Download Button */}
-              <div className="bg-slate-50 rounded-xl p-5 border border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-4">
-                <div>
-                  <h4 className="font-bold text-sm text-slate-900">
-                    Official Appointment Offer Letter (PDF)
-                  </h4>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Authenticated document issued with Company Tech branding and signature of HR Support and Co-Founder.
-                  </p>
-                </div>
-                <button
-                  onClick={handleDownloadOfferLetter}
-                  className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl text-xs font-bold hover:bg-emerald-700 transition-colors flex items-center gap-2 shadow-xs shrink-0"
-                >
-                  <FileDown className="w-4 h-4" />
-                  <span>Download Offer Letter (PDF)</span>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {record.status === 'Pending' && (
-            <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-5 text-amber-950 text-xs space-y-2">
-              <h4 className="font-bold text-sm text-amber-900 flex items-center gap-2">
-                <Clock className="w-4 h-4 text-amber-600" />
-                <span>Review Currently in Progress</span>
-              </h4>
-              <p className="leading-relaxed">
-                Your application has been logged in Cloud Firestore and queued for evaluation by our recruitment panel.
-                Decision updates and appointment documents will be reflected here and communicated via email.
-              </p>
-            </div>
-          )}
-
-          {record.status === 'Rejected' && (
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-5 text-slate-700 text-xs space-y-2">
-              <h4 className="font-bold text-sm text-slate-900">
-                Application Status Update
-              </h4>
-              <p className="leading-relaxed">
-                Thank you for your interest in Company Tech. Due to a high volume of competitive applicants for this cycle, we are unable to extend an offer for this cohort. We encourage you to participate in upcoming application cycles.
-              </p>
-            </div>
-          )}
         </div>
       )}
     </div>

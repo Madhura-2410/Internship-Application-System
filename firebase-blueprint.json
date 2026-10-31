@@ -1,5 +1,36 @@
 {
   "entities": {
+    "User": {
+      "title": "User",
+      "description": "User account registered in Company Tech Admissions Portal",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication User UID"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "User primary email address"
+        },
+        "name": {
+          "type": "string",
+          "description": "Full display name"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["employee", "admin"],
+          "description": "System role designation: employee or admin"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when account was created"
+        }
+      },
+      "required": ["uid", "email", "role"]
+    },
     "InternshipApplication": {
       "title": "InternshipApplication",
       "description": "Internship application submitted by a candidate to Company Tech",
@@ -9,6 +40,11 @@
           "type": "string",
           "description": "Unique backend-generated application identifier (e.g. CT-2026-XXXXX)",
           "maxLength": 64
+        },
+        "applicantUid": {
+          "type": "string",
+          "description": "Authenticated applicant UID associated with the submission",
+          "maxLength": 128
         },
         "fullName": {
           "type": "string",
@@ -138,9 +174,33 @@
         }
       },
       "required": ["uid", "email", "role"]
+    },
+    "Requirement": {
+      "title": "Requirement",
+      "description": "Internship cohort requirement posting managed by administrators",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "jobTitle": { "type": "string" },
+        "department": { "type": "string" },
+        "description": { "type": "string" },
+        "requiredSkills": { "type": "array", "items": { "type": "string" } },
+        "eligibilityCriteria": { "type": "string" },
+        "experienceLevel": { "type": "string" },
+        "duration": { "type": "string" },
+        "openingsCount": { "type": "number" },
+        "location": { "type": "string" },
+        "applicationDeadline": { "type": "string" },
+        "status": { "type": "string", "enum": ["open", "closed"] }
+      },
+      "required": ["id", "jobTitle", "department", "status"]
     }
   },
   "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles with registered roles (employee or admin)"
+    },
     "/internshipApplications/{applicationId}": {
       "schema": "InternshipApplication",
       "description": "Collection of candidate internship applications and administrative workflow records"
@@ -148,6 +208,10 @@
     "/admins/{adminId}": {
       "schema": "Admin",
       "description": "Authorized administrators who can review, accept, and reject internship applications"
+    },
+    "/requirements/{requirementId}": {
+      "schema": "Requirement",
+      "description": "Internship job openings and cohort requirement postings"
     }
   }
 }

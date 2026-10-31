@@ -1,5 +1,13 @@
+import { Resend } from 'resend';
 import nodemailer from 'nodemailer';
-import { InternshipApplication } from '../types';
+import {
+  serverDb,
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+} from './db.ts';
+import type { InternshipApplication, EmailLogRecord, EmailLogType } from '../types/index.ts';
 
 export interface EmailDispatchResult {
   success: boolean;
@@ -8,6 +16,7 @@ export interface EmailDispatchResult {
   error?: string;
   provider?: string;
   timestamp: string;
+  alreadySent?: boolean;
 }
 
 export interface OutboundEmailPayload {
@@ -17,35 +26,180 @@ export interface OutboundEmailPayload {
   text: string;
   attachments?: {
     filename: string;
-    content: Buffer | string; // Buffer or base64 or string
+    content: Buffer | string;
     contentType?: string;
   }[];
+  applicationId: string;
+  logType: EmailLogType;
+  metadata?: Record<string, any>;
+  force?: boolean;
+}
+
+function cleanUndefined(obj: any): any {
+  if (Array.isArray(obj)) {
+    return obj.map(cleanUndefined);
+  } else if (obj !== null && typeof obj === 'object') {
+    const cleaned: any = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (v !== undefined) {
+        cleaned[k] = cleanUndefined(v);
+      }
+    }
+    return cleaned;
+  }
+  return obj;
 }
 
 export class EmailService {
-  private static getSupportEmail(): string {
+  public static getSupportEmail(): string {
     return process.env.SUPPORT_EMAIL || 'support@companytech.internal';
   }
 
-  private static getFromAddress(): string {
-    return process.env.RESEND_FROM_EMAIL || process.env.SMTP_FROM || 'Company Tech Admissions <admissions@companytech.internal>';
+  public static getFromAddress(isResend: boolean = false): string {
+    if (process.env.RESEND_FROM_EMAIL && process.env.RESEND_FROM_EMAIL.trim().length > 0) {
+      return process.env.RESEND_FROM_EMAIL.trim();
+    }
+    if (isResend) {
+      // Resend requires onboarding@resend.dev unless a custom domain is verified
+      return 'Company Tech <onboarding@resend.dev>';
+    }
+    return process.env.SMTP_FROM || 'Company Tech Admissions <admissions@companytech.internal>';
   }
 
   /**
-   * Dispatches an email via configured provider (Resend API or SMTP).
-   * If credentials are missing, records genuine provider configuration failure without mock success.
+   * Helper to inspect sender domain and configuration status
+   */
+  public static verifySenderConfiguration(): {
+    resendConfigured: boolean;
+    fromEmail: string;
+    supportEmail: string;
+    provider: string;
+    domainHint: string;
+  } {
+    const resendApiKey = process.env.RESEND_API_KEY;
+    const isResendConfigured = !!resendApiKey && !resendApiKey.includes('MY_') && resendApiKey.trim().length > 0;
+    const fromEmail = this.getFromAddress(isResendConfigured);
+    const supportEmail = this.getSupportEmail();
+    const provider = isResendConfigured ? 'Resend' : process.env.SMTP_HOST ? 'SMTP' : 'Unconfigured';
+    const domainHint = isResendConfigured
+      ? fromEmail.includes('resend.dev')
+        ? 'Using Resend Sandbox Domain (onboarding@resend.dev). Deliverable to verified email / test recipients.'
+        : `Using Custom Configured Sender Domain (${fromEmail})`
+      : 'Outbound provider not configured. Configure RESEND_API_KEY in environment.';
+
+    return {
+      resendConfigured: isResendConfigured,
+      fromEmail,
+      supportEmail,
+      provider,
+      domainHint,
+    };
+  }
+
+  /**
+   * Checks if an email of a specific type has already been delivered for an application (Idempotency)
+   */
+  public static async checkIfAlreadySent(
+    applicationId: string,
+    type: EmailLogType
+  ): Promise<{ alreadySent: boolean; logRecord?: EmailLogRecord }> {
+    try {
+      const logId = `${applicationId}_${type}`;
+      const logRef = doc(serverDb, 'emailLogs', logId);
+      const logSnap = await getDoc(logRef);
+
+      if (logSnap.exists()) {
+        const data = logSnap.data() as EmailLogRecord;
+        if (data.status === 'Sent') {
+          return { alreadySent: true, logRecord: data };
+        }
+      }
+    } catch (e) {
+      console.warn(`[EmailService] Check alreadySent note for ${applicationId}/${type}:`, e);
+    }
+    return { alreadySent: false };
+  }
+
+  /**
+   * Dispatches an outbound email and persists separate Firestore tracking records in the `emailLogs` collection.
    */
   public static async dispatchEmail(payload: OutboundEmailPayload): Promise<EmailDispatchResult> {
     const timestamp = new Date().toISOString();
+    const logId = `${payload.applicationId}_${payload.logType}`;
+    const logRef = doc(serverDb, 'emailLogs', logId);
+
+    // 1. Idempotency Check
+    if (!payload.force) {
+      const { alreadySent, logRecord } = await this.checkIfAlreadySent(payload.applicationId, payload.logType);
+      if (alreadySent && logRecord) {
+        console.log(`[EmailService] Idempotency guard: Email ${logId} already marked Sent at ${logRecord.lastAttemptAt}. Skipping redundant dispatch.`);
+        return {
+          success: true,
+          status: 'Sent',
+          messageId: logRecord.messageId,
+          provider: logRecord.provider,
+          timestamp: logRecord.lastAttemptAt,
+          alreadySent: true,
+        };
+      }
+    }
+
+    // 2. Fetch existing attempt count if any
+    let existingAttemptCount = 0;
+    try {
+      const snap = await getDoc(logRef);
+      if (snap.exists()) {
+        existingAttemptCount = snap.data().attemptCount || 0;
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    const currentAttemptCount = existingAttemptCount + 1;
+
+    // 3. Record Initial Pending State in separate Firestore document
+    const initialLogRecord: EmailLogRecord = {
+      id: logId,
+      applicationId: payload.applicationId,
+      type: payload.logType,
+      recipient: payload.to,
+      subject: payload.subject,
+      status: 'Pending',
+      provider: 'Pending',
+      attemptCount: currentAttemptCount,
+      lastAttemptAt: timestamp,
+      hasAttachment: !!payload.attachments && payload.attachments.length > 0,
+      attachmentName: payload.attachments?.[0]?.filename,
+      createdAt: snapExistsCreatedAt(existingAttemptCount, timestamp),
+      updatedAt: timestamp,
+      metadata: payload.metadata,
+    };
+
+    try {
+      await setDoc(logRef, cleanUndefined(initialLogRecord));
+    } catch (dbErr) {
+      console.warn(`[EmailService] Initial log write warning for ${logId}:`, dbErr);
+    }
+
     const resendApiKey = process.env.RESEND_API_KEY;
     const smtpHost = process.env.SMTP_HOST;
 
-    // 1. Check Resend API
+    let dispatchResult: EmailDispatchResult = {
+      success: false,
+      status: 'Failed',
+      timestamp,
+    };
+
+    // 4. Dispatch via Resend API (Official Resend SDK with fetch fallback)
     if (resendApiKey && resendApiKey.trim().length > 0 && !resendApiKey.includes('MY_')) {
+      const fromAddress = this.getFromAddress(true);
+      console.log(`[EmailService] Dispatching via Resend SDK to ${payload.to} from ${fromAddress}`);
+
       try {
-        console.log(`[EmailService] Attempting delivery via Resend API to: ${payload.to}`);
-        const resendPayload: any = {
-          from: this.getFromAddress(),
+        const resend = new Resend(resendApiKey.trim());
+
+        const resendEmailOptions: any = {
+          from: fromAddress,
           to: [payload.to],
           subject: payload.subject,
           html: payload.html,
@@ -53,58 +207,56 @@ export class EmailService {
         };
 
         if (payload.attachments && payload.attachments.length > 0) {
-          resendPayload.attachments = payload.attachments.map((att) => ({
+          resendEmailOptions.attachments = payload.attachments.map((att) => ({
             filename: att.filename,
-            content: Buffer.isBuffer(att.content) ? att.content.toString('base64') : att.content,
+            content: Buffer.isBuffer(att.content) ? att.content : Buffer.from(att.content, 'base64'),
           }));
         }
 
-        const response = await fetch('https://api.resend.com/emails', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${resendApiKey.trim()}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(resendPayload),
-        });
+        const { data, error } = await resend.emails.send(resendEmailOptions);
 
-        const data: any = await response.json();
-        if (!response.ok) {
-          const errMsg = data?.message || `HTTP ${response.status}: Failed to dispatch via Resend`;
-          console.error(`[EmailService] Resend API rejected message:`, errMsg);
-          return {
+        if (error) {
+          console.error('[EmailService] Resend SDK returned error:', error);
+          dispatchResult = {
             success: false,
             status: 'Failed',
-            error: `Resend API Error: ${errMsg}`,
+            error: `Resend Error (${error.name || 'Error'}): ${error.message}`,
+            provider: 'Resend',
+            timestamp,
+          };
+        } else if (data && data.id) {
+          console.log(`[EmailService] Resend delivered message successfully. ID: ${data.id}`);
+          dispatchResult = {
+            success: true,
+            status: 'Sent',
+            messageId: data.id,
+            provider: 'Resend',
+            timestamp,
+          };
+        } else {
+          dispatchResult = {
+            success: false,
+            status: 'Failed',
+            error: 'Resend returned empty response without message identifier.',
             provider: 'Resend',
             timestamp,
           };
         }
-
-        console.log(`[EmailService] Message accepted by Resend with ID: ${data.id}`);
-        return {
-          success: true,
-          status: 'Sent',
-          messageId: data.id,
-          provider: 'Resend',
-          timestamp,
-        };
-      } catch (err: any) {
-        console.error(`[EmailService] Network error dispatching via Resend:`, err);
-        return {
+      } catch (sdkErr: any) {
+        console.error('[EmailService] Resend SDK invocation exception:', sdkErr);
+        dispatchResult = {
           success: false,
           status: 'Failed',
-          error: `Resend Dispatch Exception: ${err.message || String(err)}`,
+          error: `Resend Exception: ${sdkErr.message || String(sdkErr)}`,
           provider: 'Resend',
           timestamp,
         };
       }
     }
-
-    // 2. Check SMTP Configuration
-    if (smtpHost && smtpHost.trim().length > 0) {
+    // 5. Fallback: SMTP Configuration if available
+    else if (smtpHost && smtpHost.trim().length > 0) {
+      console.log(`[EmailService] Dispatching via SMTP host ${smtpHost} to ${payload.to}`);
       try {
-        console.log(`[EmailService] Attempting delivery via SMTP host ${smtpHost} to: ${payload.to}`);
         const transporter = nodemailer.createTransport({
           host: smtpHost,
           port: parseInt(process.env.SMTP_PORT || '587', 10),
@@ -116,7 +268,7 @@ export class EmailService {
         });
 
         const mailOptions: any = {
-          from: this.getFromAddress(),
+          from: this.getFromAddress(false),
           to: payload.to,
           subject: payload.subject,
           text: payload.text,
@@ -129,40 +281,63 @@ export class EmailService {
 
         const info = await transporter.sendMail(mailOptions);
         console.log(`[EmailService] SMTP email sent: ${info.messageId}`);
-        return {
+        dispatchResult = {
           success: true,
           status: 'Sent',
           messageId: info.messageId,
           provider: 'SMTP',
           timestamp,
         };
-      } catch (err: any) {
-        console.error(`[EmailService] SMTP delivery failed:`, err);
-        return {
+      } catch (smtpErr: any) {
+        console.error('[EmailService] SMTP delivery failed:', smtpErr);
+        dispatchResult = {
           success: false,
           status: 'Failed',
-          error: `SMTP Delivery Exception: ${err.message || String(err)}`,
+          error: `SMTP Delivery Exception: ${smtpErr.message || String(smtpErr)}`,
           provider: 'SMTP',
           timestamp,
         };
       }
     }
+    // 6. No provider configured
+    else {
+      console.warn('[EmailService] Outbound email provider not configured (RESEND_API_KEY required). Tracking real failed state in Firestore.');
+      dispatchResult = {
+        success: false,
+        status: 'Failed',
+        error: 'Delivery blocked: Resend API credentials not configured. Configure RESEND_API_KEY in environment.',
+        provider: 'Unconfigured',
+        timestamp,
+      };
+    }
 
-    // 3. No outbound credentials configured
-    console.warn(`[EmailService] Outbound email provider not configured. (Requires RESEND_API_KEY or SMTP_HOST in .env). Preserving durable payload for retry.`);
-    return {
-      success: false,
-      status: 'Failed',
-      error: 'Delivery blocked: Outbound provider credentials not configured. Configure RESEND_API_KEY or SMTP settings in .env.',
-      provider: 'Unconfigured',
-      timestamp,
-    };
+    // 7. Update Separate Firestore Record in `emailLogs`
+    try {
+      await updateDoc(logRef, cleanUndefined({
+        status: dispatchResult.status,
+        provider: dispatchResult.provider || 'Resend',
+        messageId: dispatchResult.messageId || null,
+        error: dispatchResult.error || null,
+        attemptCount: currentAttemptCount,
+        lastAttemptAt: timestamp,
+        updatedAt: timestamp,
+      }));
+      console.log(`[EmailService] Recorded delivery outcome in Firestore emailLogs/${logId}: ${dispatchResult.status}`);
+    } catch (updateErr) {
+      console.warn(`[EmailService] Could not update emailLogs/${logId}:`, updateErr);
+    }
+
+    return dispatchResult;
   }
 
   /**
-   * 1. Applicant Confirmation Email
+   * 1. Send Applicant Confirmation Email
+   * Triggered upon successful application creation in Firestore
    */
-  public static async sendApplicantConfirmationEmail(app: InternshipApplication): Promise<EmailDispatchResult> {
+  public static async sendApplicantConfirmationEmail(
+    app: InternshipApplication,
+    force?: boolean
+  ): Promise<EmailDispatchResult> {
     const subject = `Application Received: ${app.role} Internship - Company Tech (ID: ${app.applicationId})`;
     const html = `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; color: #1e293b; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px;">
@@ -190,13 +365,25 @@ export class EmailService {
       subject,
       html,
       text,
+      applicationId: app.applicationId,
+      logType: 'applicant_confirmation',
+      metadata: {
+        applicantName: app.fullName,
+        role: app.role,
+        college: app.college,
+      },
+      force,
     });
   }
 
   /**
-   * 2. Support Notification Email
+   * 2. Send Support Notification Email
+   * Triggered upon successful application creation in Firestore
    */
-  public static async sendSupportNotificationEmail(app: InternshipApplication): Promise<EmailDispatchResult> {
+  public static async sendSupportNotificationEmail(
+    app: InternshipApplication,
+    force?: boolean
+  ): Promise<EmailDispatchResult> {
     const supportEmail = this.getSupportEmail();
     const subject = `[New Application] ${app.fullName} - ${app.role} (ID: ${app.applicationId})`;
     const html = `
@@ -226,17 +413,27 @@ export class EmailService {
       subject,
       html,
       text,
+      applicationId: app.applicationId,
+      logType: 'support_notification',
+      metadata: {
+        applicantName: app.fullName,
+        role: app.role,
+        college: app.college,
+      },
+      force,
     });
   }
 
   /**
-   * 3. Official Offer Letter Email with Attached PDF
+   * 3. Send Official Offer Letter Email with Attached PDF
+   * Triggered when an authorized administrator accepts an application
    */
   public static async sendOfferLetterEmail(
     app: InternshipApplication,
     pdfBuffer: Buffer,
     duration: string,
-    joiningDate: string
+    joiningDate: string,
+    force?: boolean
   ): Promise<EmailDispatchResult> {
     const subject = `Official Offer Letter: ${app.role} Internship - Company Tech (ID: ${app.applicationId})`;
     const html = `
@@ -273,13 +470,27 @@ export class EmailService {
           contentType: 'application/pdf',
         },
       ],
+      applicationId: app.applicationId,
+      logType: 'decision_acceptance',
+      metadata: {
+        applicantName: app.fullName,
+        role: app.role,
+        duration,
+        joiningDate,
+      },
+      force,
     });
   }
 
   /**
-   * 4. Fixed Official Rejection Email
+   * 4. Send Predefined Rejection Email
+   * Triggered when an authorized administrator rejects an application
    */
-  public static async sendRejectionEmail(app: InternshipApplication, reason?: string): Promise<EmailDispatchResult> {
+  public static async sendRejectionEmail(
+    app: InternshipApplication,
+    reason?: string,
+    force?: boolean
+  ): Promise<EmailDispatchResult> {
     const subject = `Application Update: ${app.role} Internship - Company Tech (ID: ${app.applicationId})`;
     const html = `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; color: #1e293b; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px;">
@@ -308,6 +519,18 @@ export class EmailService {
       subject,
       html,
       text,
+      applicationId: app.applicationId,
+      logType: 'decision_rejection',
+      metadata: {
+        applicantName: app.fullName,
+        role: app.role,
+        reason: reason || 'Competitive evaluation',
+      },
+      force,
     });
   }
+}
+
+function snapExistsCreatedAt(attemptCount: number, defaultIso: string): string {
+  return attemptCount > 0 ? defaultIso : defaultIso;
 }
