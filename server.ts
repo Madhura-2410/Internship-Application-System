@@ -14,10 +14,11 @@ import {
   where,
   getDocs,
   deleteDoc,
+  adminAuth,
 } from './src/server/db.ts';
 import crypto from 'crypto';
 import { EmailService } from './src/server/emailService.ts';
-import { generateOfferLetterPdf } from './src/lib/pdfGenerator.ts';
+import { generateOfferLetterPdf, generateRejectionLetterPdf } from './src/lib/pdfGenerator.ts';
 import { APPROVED_ROLES, InternshipRole, InternshipApplication, InternshipRequirement } from './src/types/index.ts';
 
 dotenv.config();
@@ -33,6 +34,8 @@ app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'madhurashekarraju@gmail.com';
+const AUTHORIZED_ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'madhurashekarraju@gmail.com').toLowerCase();
+const AUTHORIZED_ADMIN_UID = process.env.ADMIN_UID || 'YYU209EtncOw8SQLH15dkOhctdT2';
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@companytech.internal';
 
 const VALID_ROLES = new Set(APPROVED_ROLES.map((r) => r.id));
@@ -335,9 +338,9 @@ app.get('/api/requirements', async (req, res) => {
 // Requirements: Post New Requirement (Admin Only)
 app.post('/api/requirements', async (req, res) => {
   try {
-    const authCheck = verifyAdminAuthorization(req);
+    const authCheck = await verifyAdminAuthorization(req);
     if (!authCheck.authorized) {
-      return res.status(403).json({ error: 'Unauthorized: Admin privileges required to post requirements.' });
+      return res.status(403).json({ error: authCheck.error || 'Unauthorized: Admin privileges required to post requirements.' });
     }
 
     const {
@@ -387,7 +390,7 @@ app.post('/api/requirements', async (req, res) => {
       location: (location && String(location).trim()) || 'Remote',
       applicationDeadline: (applicationDeadline && String(applicationDeadline).trim()) || '2026-12-31',
       status: status === 'closed' ? 'closed' : 'open',
-      adminUid: 'admin-system-verified',
+      adminUid: authCheck.uid || 'admin-system-verified',
       adminEmail: authCheck.email || ADMIN_EMAIL,
       createdAt: nowIso,
       updatedAt: nowIso,
@@ -410,9 +413,9 @@ app.post('/api/requirements', async (req, res) => {
 // Requirements: Update Requirement (Admin Only)
 app.put('/api/requirements/:id', async (req, res) => {
   try {
-    const authCheck = verifyAdminAuthorization(req);
+    const authCheck = await verifyAdminAuthorization(req);
     if (!authCheck.authorized) {
-      return res.status(403).json({ error: 'Unauthorized: Admin privileges required to update requirements.' });
+      return res.status(403).json({ error: authCheck.error || 'Unauthorized: Admin privileges required to update requirements.' });
     }
 
     const { id } = req.params;
@@ -451,9 +454,9 @@ app.put('/api/requirements/:id', async (req, res) => {
 // Requirements: Delete Requirement (Admin Only)
 app.delete('/api/requirements/:id', async (req, res) => {
   try {
-    const authCheck = verifyAdminAuthorization(req);
+    const authCheck = await verifyAdminAuthorization(req);
     if (!authCheck.authorized) {
-      return res.status(403).json({ error: 'Unauthorized: Admin privileges required to delete requirements.' });
+      return res.status(403).json({ error: authCheck.error || 'Unauthorized: Admin privileges required to delete requirements.' });
     }
 
     const { id } = req.params;
@@ -714,30 +717,79 @@ app.get('/api/applications/my-applications', async (req, res) => {
   }
 });
 
-// Helper for Admin Authorization Verification
-function verifyAdminAuthorization(req: express.Request): { authorized: boolean; email?: string } {
-  const adminHeader = req.headers['x-admin-email'] as string;
-  const adminAuthHeader = req.headers['authorization'];
+// Helper for Secure Admin Authorization Verification
+async function verifyAdminAuthorization(req: express.Request): Promise<{ authorized: boolean; email?: string; uid?: string; error?: string }> {
+  const authHeader = req.headers['authorization'];
 
-  if (adminHeader && adminHeader.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
-    return { authorized: true, email: adminHeader };
+  // 1. Enforce Firebase Bearer ID Token - never trust frontend-supplied UIDs directly
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return {
+      authorized: false,
+      error: 'Unauthorized: Missing or invalid Authorization header. A valid Firebase ID token is required.',
+    };
   }
 
-  // Check query or body
-  const bodyEmail = req.body?.adminEmail || req.query?.adminEmail;
-  if (bodyEmail && String(bodyEmail).toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
-    return { authorized: true, email: String(bodyEmail) };
+  const idToken = authHeader.split('Bearer ')[1]?.trim();
+  if (!idToken) {
+    return {
+      authorized: false,
+      error: 'Unauthorized: Empty Firebase ID token in Authorization header.',
+    };
   }
 
-  return { authorized: false };
+  if (!adminAuth) {
+    return {
+      authorized: false,
+      error: 'Server authentication service is temporarily unavailable.',
+    };
+  }
+
+  try {
+    const decodedToken = await adminAuth.verifyIdToken(idToken);
+    const tokenUid = decodedToken.uid;
+    const tokenEmail = (decodedToken.email || '').toLowerCase();
+
+    // 2. Configure backend to strictly recognize this UID and Email as the only authorized administrator
+    if (tokenUid !== AUTHORIZED_ADMIN_UID || tokenEmail !== AUTHORIZED_ADMIN_EMAIL) {
+      console.warn(`[Backend Auth] Admin rejection: UID "${tokenUid}" or email "${tokenEmail}" does not match authorized administrator (${AUTHORIZED_ADMIN_UID} / ${AUTHORIZED_ADMIN_EMAIL})`);
+      return {
+        authorized: false,
+        error: 'Forbidden: Access denied. This account is not authorized as the Company Tech administrator.',
+      };
+    }
+
+    // 3. Double-check admin record in Firestore
+    const adminRef = doc(serverDb, 'admins', AUTHORIZED_ADMIN_UID);
+    const adminDoc = await getDoc(adminRef);
+    if (!adminDoc.exists()) {
+      await setDoc(adminRef, {
+        uid: AUTHORIZED_ADMIN_UID,
+        email: AUTHORIZED_ADMIN_EMAIL,
+        role: 'admin',
+        createdAt: new Date().toISOString(),
+      }, { merge: true });
+    }
+
+    return {
+      authorized: true,
+      email: tokenEmail,
+      uid: tokenUid,
+    };
+  } catch (tokenErr: any) {
+    console.warn('[Backend Auth] ID token verification failure:', tokenErr.message);
+    return {
+      authorized: false,
+      error: `Authentication failed: ${tokenErr.message || 'Invalid or expired Firebase ID token.'}`,
+    };
+  }
 }
 
 // 3. List Applications for Administrator
 app.get('/api/applications', async (req, res) => {
   try {
-    const authCheck = verifyAdminAuthorization(req);
+    const authCheck = await verifyAdminAuthorization(req);
     if (!authCheck.authorized) {
-      return res.status(403).json({ error: 'Unauthorized: Admin authentication required.' });
+      return res.status(403).json({ error: authCheck.error || 'Unauthorized: Admin authentication required.' });
     }
 
     const applications: InternshipApplication[] = [];
@@ -768,9 +820,9 @@ app.get('/api/applications', async (req, res) => {
 // 4. Accept or Reject Decision Workflow
 app.post('/api/applications/:id/decision', async (req, res) => {
   try {
-    const authCheck = verifyAdminAuthorization(req);
+    const authCheck = await verifyAdminAuthorization(req);
     if (!authCheck.authorized) {
-      return res.status(403).json({ error: 'Unauthorized: Admin privileges required.' });
+      return res.status(403).json({ error: authCheck.error || 'Unauthorized: Admin privileges required.' });
     }
 
     const { id } = req.params;
@@ -813,8 +865,8 @@ app.post('/api/applications/:id/decision', async (req, res) => {
 
       const decisionMetadata = {
         action: 'Accepted' as const,
-        adminUid: adminUid || 'admin-system-verified',
-        adminEmail: authCheck.email || ADMIN_EMAIL,
+        adminUid: authCheck.uid || AUTHORIZED_ADMIN_UID,
+        adminEmail: authCheck.email || AUTHORIZED_ADMIN_EMAIL,
         timestamp: decisionTimestamp,
         duration,
         joiningDate: joiningDate.trim(),
@@ -929,8 +981,8 @@ app.post('/api/applications/:id/decision', async (req, res) => {
       // Action: Rejected
       const decisionMetadata = {
         action: 'Rejected' as const,
-        adminUid: adminUid || 'admin-system-verified',
-        adminEmail: authCheck.email || ADMIN_EMAIL,
+        adminUid: authCheck.uid || AUTHORIZED_ADMIN_UID,
+        adminEmail: authCheck.email || AUTHORIZED_ADMIN_EMAIL,
         timestamp: decisionTimestamp,
         rejectionReason: rejectionReason || 'High volume of competitive applications.',
         notes: notes || '',
@@ -949,10 +1001,34 @@ app.post('/api/applications/:id/decision', async (req, res) => {
         console.warn('Roll update note:', e);
       }
 
-      console.log(`[Backend] Application ${id} status successfully updated to Rejected in Firestore. Processing notification...`);
+      console.log(`[Backend] Application ${id} status successfully updated to Rejected in Firestore. Processing notification with official PDF letter...`);
 
-      // 2. Dispatch predefined professional rejection email
-      const emailResult = await EmailService.sendRejectionEmail(appData, rejectionReason);
+      // 2. Generate Official Rejection Letter PDF
+      let rejectionPdfBuffer: Buffer | undefined = undefined;
+      let rejectionLetterUrl = '';
+      try {
+        const docPdf = generateRejectionLetterPdf({
+          applicationId: appData.applicationId,
+          fullName: appData.fullName,
+          email: appData.email,
+          college: appData.college,
+          role: appData.role,
+          rejectionReason,
+        });
+        const arrayBuffer = docPdf.output('arraybuffer');
+        rejectionPdfBuffer = Buffer.from(arrayBuffer);
+        rejectionLetterUrl = `data:application/pdf;base64,${rejectionPdfBuffer.toString('base64')}`;
+      } catch (pdfErr: any) {
+        console.error('[Backend] Rejection letter PDF generation error:', pdfErr);
+      }
+
+      // 3. Dispatch predefined professional rejection email with attached PDF
+      const emailResult = await EmailService.sendRejectionEmail(
+        appData,
+        rejectionReason,
+        false,
+        rejectionPdfBuffer
+      );
 
       const emailProcessing = {
         ...appData.emailProcessing,
@@ -965,9 +1041,10 @@ app.post('/api/applications/:id/decision', async (req, res) => {
         },
       };
 
-      // 3. Record updated delivery tracking in Firestore
+      // 4. Record updated delivery tracking in Firestore
       await updateDoc(docRef, cleanUndefined({
         emailProcessing: cleanUndefined(emailProcessing),
+        rejectionLetterUrl: rejectionLetterUrl || undefined,
       }));
 
       console.log(`[Backend] Application ${id} rejection notification completed. Status: ${emailResult.status}.`);
@@ -979,6 +1056,7 @@ app.post('/api/applications/:id/decision', async (req, res) => {
         decision: decisionMetadata,
         emailDeliveryStatus: emailResult.status,
         emailError: emailResult.error,
+        rejectionLetterUrl,
       });
     }
   } catch (error: any) {
@@ -990,9 +1068,9 @@ app.post('/api/applications/:id/decision', async (req, res) => {
 // 5. Retry Notification / PDF Generation for Failed Operations with Idempotency Guard
 app.post('/api/applications/:id/retry', async (req, res) => {
   try {
-    const authCheck = verifyAdminAuthorization(req);
+    const authCheck = await verifyAdminAuthorization(req);
     if (!authCheck.authorized) {
-      return res.status(403).json({ error: 'Unauthorized: Admin privileges required.' });
+      return res.status(403).json({ error: authCheck.error || 'Unauthorized: Admin privileges required.' });
     }
 
     const { id } = req.params;
@@ -1065,7 +1143,26 @@ app.post('/api/applications/:id/retry', async (req, res) => {
           !!force
         );
       } else if (appData.status === 'Rejected') {
-        dispatchResult = await EmailService.sendRejectionEmail(appData, appData.decision?.rejectionReason, !!force);
+        let rejectionPdfBuffer: Buffer | undefined = undefined;
+        try {
+          const docPdf = generateRejectionLetterPdf({
+            applicationId: appData.applicationId,
+            fullName: appData.fullName,
+            email: appData.email,
+            college: appData.college,
+            role: appData.role,
+            rejectionReason: appData.decision?.rejectionReason,
+          });
+          rejectionPdfBuffer = Buffer.from(docPdf.output('arraybuffer'));
+        } catch (pdfErr) {
+          console.error('[Backend] Rejection PDF buffer error on retry:', pdfErr);
+        }
+        dispatchResult = await EmailService.sendRejectionEmail(
+          appData,
+          appData.decision?.rejectionReason,
+          !!force,
+          rejectionPdfBuffer
+        );
       } else {
         return res.status(400).json({ error: 'Cannot retry decision email for a Pending application.' });
       }
@@ -1097,9 +1194,9 @@ app.post('/api/applications/:id/retry', async (req, res) => {
 // 6. Admin Email Delivery Logs (Separate Firestore records)
 app.get('/api/admin/email-logs', async (req, res) => {
   try {
-    const authCheck = verifyAdminAuthorization(req);
+    const authCheck = await verifyAdminAuthorization(req);
     if (!authCheck.authorized) {
-      return res.status(403).json({ error: 'Unauthorized: Admin privileges required.' });
+      return res.status(403).json({ error: authCheck.error || 'Unauthorized: Admin privileges required.' });
     }
 
     const { applicationId } = req.query;

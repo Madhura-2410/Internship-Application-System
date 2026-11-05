@@ -18,6 +18,7 @@ import {
   Clock,
   Sparkles,
 } from 'lucide-react';
+import { ResumeBuilderModal } from './ResumeBuilderModal';
 
 interface ApplicationFormModalProps {
   role: InternshipRole;
@@ -42,9 +43,12 @@ export const ApplicationFormModal: React.FC<ApplicationFormModalProps> = ({
   const [pursuingYear, setPursuingYear] = useState('3rd Year');
   const [experienceLevel, setExperienceLevel] = useState<ExperienceLevel>('Fresher');
 
-  // Resume state
+  // Resume state & Dual Option selector
+  const [resumeMode, setResumeMode] = useState<'upload' | 'builder'>('upload');
+  const [showResumeBuilder, setShowResumeBuilder] = useState(false);
   const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [resumeBase64, setResumeBase64] = useState<string | null>(null);
+  const [resumeGeneratedTitle, setResumeGeneratedTitle] = useState<string | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
 
   // Submission state
@@ -134,7 +138,7 @@ export const ApplicationFormModal: React.FC<ApplicationFormModalProps> = ({
           pursuingYear,
           experienceLevel,
           role,
-          resumeFileName: resumeFile?.name,
+          resumeFileName: resumeFile?.name || resumeGeneratedTitle || undefined,
           resumeBase64: resumeBase64 || undefined,
           applicantUid: userUid || undefined,
         }),
@@ -420,54 +424,116 @@ export const ApplicationFormModal: React.FC<ApplicationFormModalProps> = ({
                 </div>
               </div>
 
-              {/* Resume Upload (Optional) */}
+              {/* Resume Submission Section: Option A & Option B */}
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Resume / CV Document (Optional)
+                <label className="block text-xs font-bold text-slate-800 mb-2">
+                  Resume Submission <span className="text-slate-400 font-normal">(Choose Option A or Option B)</span>
                 </label>
 
-                {resumeFile ? (
-                  <div className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                {/* Option Tabs */}
+                <div className="grid grid-cols-2 gap-2 mb-3">
+                  <button
+                    type="button"
+                    onClick={() => setResumeMode('upload')}
+                    className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                      resumeMode === 'upload'
+                        ? 'bg-[#172321] text-white shadow-xs'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-200'
+                    }`}
+                  >
+                    <UploadCloud className="w-3.5 h-3.5" />
+                    <span>Option A: Upload PDF</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setResumeMode('builder');
+                      setShowResumeBuilder(true);
+                    }}
+                    className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                      resumeMode === 'builder'
+                        ? 'bg-[#9ac637] text-[#172321] shadow-xs'
+                        : 'bg-[#d6ef70]/30 text-[#172321] hover:bg-[#d6ef70]/50 border border-[#9ac637]/40'
+                    }`}
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Option B: ATS Resume Builder</span>
+                  </button>
+                </div>
+
+                {/* Attached Resume Status Banner (if either file uploaded or built) */}
+                {(resumeFile || resumeGeneratedTitle) && (
+                  <div className="flex items-center justify-between p-3 mb-3 bg-emerald-50/70 border border-emerald-300 rounded-xl">
                     <div className="flex items-center gap-2.5">
-                      <FileText className="w-5 h-5 text-teal-600" />
+                      <FileText className="w-5 h-5 text-emerald-600" />
                       <div>
                         <p className="text-xs font-bold text-slate-900 truncate max-w-xs sm:max-w-sm">
-                          {resumeFile.name}
+                          {resumeFile ? resumeFile.name : resumeGeneratedTitle}
                         </p>
-                        <p className="text-[10px] text-slate-500">
-                          {(resumeFile.size / 1024 / 1024).toFixed(2)} MB • Ready for submission
+                        <p className="text-[10px] text-emerald-700 font-medium">
+                          {resumeFile
+                            ? `${(resumeFile.size / 1024 / 1024).toFixed(2)} MB • Uploaded & Ready`
+                            : 'Generated with ATS Template • Ready for submission'}
                         </p>
                       </div>
                     </div>
                     <button
                       type="button"
-                      onClick={removeFile}
+                      onClick={() => {
+                        setResumeFile(null);
+                        setResumeBase64(null);
+                        setResumeGeneratedTitle(null);
+                      }}
                       className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
                       title="Remove file"
                     >
                       <X className="w-4 h-4" />
                     </button>
                   </div>
-                ) : (
+                )}
+
+                {/* Option A Body: Direct Upload */}
+                {resumeMode === 'upload' && !resumeFile && !resumeGeneratedTitle && (
                   <div>
-                    <label className="border-2 border-dashed border-slate-200 hover:border-teal-500 rounded-xl p-4 flex flex-col items-center justify-center cursor-pointer bg-slate-50/50 hover:bg-teal-50/20 transition-all">
-                      <UploadCloud className="w-6 h-6 text-slate-400 mb-1" />
-                      <span className="text-xs font-semibold text-slate-800">
-                        Click to select resume (PDF, DOC, DOCX up to 5MB)
+                    <label className="border-2 border-dashed border-slate-300 hover:border-slate-800 rounded-xl p-4 flex flex-col items-center justify-center cursor-pointer bg-slate-50/50 hover:bg-slate-100/50 transition-all">
+                      <UploadCloud className="w-6 h-6 text-slate-500 mb-1" />
+                      <span className="text-xs font-bold text-slate-800">
+                        Select Existing Resume (PDF format, max 5MB)
+                      </span>
+                      <span className="text-[10px] text-slate-400 mt-0.5">
+                        Click to browse from your computer
                       </span>
                       <input
                         type="file"
-                        accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        accept=".pdf,application/pdf"
                         onChange={handleFileChange}
                         className="hidden"
                       />
                     </label>
                     {fileError && (
-                      <p className="text-xs text-rose-600 font-medium mt-1 flex items-center gap-1">
+                      <p className="text-xs text-rose-600 font-medium mt-1.5 flex items-center gap-1">
                         <AlertCircle className="w-3.5 h-3.5" />
                         <span>{fileError}</span>
                       </p>
                     )}
+                  </div>
+                )}
+
+                {/* Option B Body: Launch Template Builder */}
+                {resumeMode === 'builder' && !resumeFile && !resumeGeneratedTitle && (
+                  <div className="p-4 rounded-xl border border-[#9ac637]/40 bg-[#f7f8f3] text-center space-y-2">
+                    <p className="text-xs font-semibold text-slate-800">
+                      Need a clean, professional ATS resume? Use our 3 built-in templates (Modern Tech, Executive ATS, Product Minimalist).
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setShowResumeBuilder(true)}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#172321] text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-colors shadow-xs"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-[#d6ef70]" />
+                      <span>Open Resume Builder & Live Preview</span>
+                    </button>
                   </div>
                 )}
               </div>
@@ -503,6 +569,22 @@ export const ApplicationFormModal: React.FC<ApplicationFormModalProps> = ({
           </div>
         )}
       </div>
+
+      {/* Interactive Resume Builder Modal */}
+      {showResumeBuilder && (
+        <ResumeBuilderModal
+          initialName={fullName}
+          initialEmail={email}
+          targetRole={role}
+          onClose={() => setShowResumeBuilder(false)}
+          onUseResume={(pdfBase64, fileName) => {
+            setResumeBase64(pdfBase64);
+            setResumeGeneratedTitle(fileName);
+            setResumeFile(null);
+            setShowResumeBuilder(false);
+          }}
+        />
+      )}
     </div>
   );
 };

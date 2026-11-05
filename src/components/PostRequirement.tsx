@@ -20,10 +20,40 @@ import {
   Lock,
   Unlock,
 } from 'lucide-react';
+import { auth } from '../firebase';
 
 interface PostRequirementProps {
   adminEmail: string;
   onRequirementUpdated?: () => void;
+}
+
+// Helper to get authenticated headers with verified Firebase ID token
+async function getAdminHeaders(adminEmail: string): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  try {
+    let user = auth.currentUser;
+    if (!user) {
+      await new Promise<void>((resolve) => {
+        const unsubscribe = auth.onAuthStateChanged((u) => {
+          unsubscribe();
+          user = u;
+          resolve();
+        });
+        setTimeout(resolve, 1500);
+      });
+    }
+    if (user) {
+      const token = await user.getIdToken();
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+    }
+  } catch (e) {
+    console.warn('ID token fetch note:', e);
+  }
+  return headers;
 }
 
 export const PostRequirement: React.FC<PostRequirementProps> = ({
@@ -167,13 +197,15 @@ export const PostRequirement: React.FC<PostRequirementProps> = ({
         status,
       };
 
+      const adminHeaders = await getAdminHeaders(adminEmail);
+
       if (editingId) {
         // Update
         const res = await fetch(`/api/requirements/${editingId}`, {
           method: 'PUT',
           headers: {
             'Content-Type': 'application/json',
-            'x-admin-email': adminEmail,
+            ...adminHeaders,
           },
           body: JSON.stringify(payload),
         });
@@ -187,7 +219,7 @@ export const PostRequirement: React.FC<PostRequirementProps> = ({
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'x-admin-email': adminEmail,
+            ...adminHeaders,
           },
           body: JSON.stringify(payload),
         });
@@ -211,11 +243,12 @@ export const PostRequirement: React.FC<PostRequirementProps> = ({
     setActionSuccess(null);
     const newStatus = req.status === 'open' ? 'closed' : 'open';
     try {
+      const adminHeaders = await getAdminHeaders(adminEmail);
       const res = await fetch(`/api/requirements/${req.id}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-email': adminEmail,
+          ...adminHeaders,
         },
         body: JSON.stringify({ status: newStatus }),
       });
@@ -239,10 +272,11 @@ export const PostRequirement: React.FC<PostRequirementProps> = ({
     setActionError(null);
     setActionSuccess(null);
     try {
+      const adminHeaders = await getAdminHeaders(adminEmail);
       const res = await fetch(`/api/requirements/${id}`, {
         method: 'DELETE',
         headers: {
-          'x-admin-email': adminEmail,
+          ...adminHeaders,
         },
       });
       const data = await res.json();

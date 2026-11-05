@@ -28,6 +28,23 @@ try {
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 export const serverDb = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
+// Initialize Firebase Admin SDK
+import { initializeApp as initAdminApp, getApps as getAdminApps } from 'firebase-admin/app';
+import { getAuth as getAdminAuth, Auth as AdminAuthType } from 'firebase-admin/auth';
+
+let adminAuthInstance: AdminAuthType | null = null;
+try {
+  const adminApp = getAdminApps().length === 0
+    ? initAdminApp({ projectId: firebaseConfig.projectId || 'caramel-vault-pl37k' })
+    : getAdminApps()[0];
+  adminAuthInstance = getAdminAuth(adminApp);
+  console.log('[Server DB] Firebase Admin SDK initialized for project:', firebaseConfig.projectId);
+} catch (adminErr) {
+  console.warn('[Server DB] Firebase Admin SDK init note:', adminErr);
+}
+
+export const adminAuth = adminAuthInstance;
+
 export {
   doc,
   getDoc,

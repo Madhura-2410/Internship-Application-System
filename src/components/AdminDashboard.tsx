@@ -32,9 +32,39 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { downloadOfferLetterPdf } from '../lib/pdfGenerator';
+import { auth } from '../firebase';
 
 interface AdminDashboardProps {
   adminEmail: string;
+}
+
+// Helper to get authenticated headers with verified Firebase ID token
+async function getAdminHeaders(adminEmail: string): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  try {
+    let user = auth.currentUser;
+    if (!user) {
+      await new Promise<void>((resolve) => {
+        const unsubscribe = auth.onAuthStateChanged((u) => {
+          unsubscribe();
+          user = u;
+          resolve();
+        });
+        setTimeout(resolve, 1500);
+      });
+    }
+    if (user) {
+      const token = await user.getIdToken();
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+    }
+  } catch (e) {
+    console.warn('ID token fetch note:', e);
+  }
+  return headers;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) => {
@@ -95,10 +125,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
     try {
       setLoading(true);
       setError(null);
+      const headers = await getAdminHeaders(adminEmail);
       const res = await fetch('/api/applications', {
-        headers: {
-          'x-admin-email': adminEmail,
-        },
+        headers,
       });
 
       if (!res.ok) {
@@ -119,10 +148,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
   const fetchEmailLogs = async () => {
     try {
       setLoadingLogs(true);
+      const headers = await getAdminHeaders(adminEmail);
       const res = await fetch('/api/admin/email-logs', {
-        headers: {
-          'x-admin-email': adminEmail,
-        },
+        headers,
       });
       if (res.ok) {
         const data = await res.json();
@@ -168,11 +196,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
     setDecisionError(null);
 
     try {
+      const headers = await getAdminHeaders(adminEmail);
       const res = await fetch(`/api/applications/${acceptingApp.applicationId}/decision`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-email': adminEmail,
+          ...headers,
         },
         body: JSON.stringify({
           action: 'Accepted',
@@ -180,6 +209,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
           joiningDate: acceptJoiningDate,
           notes: acceptNotes,
           adminEmail,
+          adminUid: auth.currentUser?.uid,
         }),
       });
 
@@ -207,16 +237,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
     setDecisionError(null);
 
     try {
+      const headers = await getAdminHeaders(adminEmail);
       const res = await fetch(`/api/applications/${rejectingApp.applicationId}/decision`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-email': adminEmail,
+          ...headers,
         },
         body: JSON.stringify({
           action: 'Rejected',
           rejectionReason: rejectReason,
           adminEmail,
+          adminUid: auth.currentUser?.uid,
         }),
       });
 
@@ -241,13 +273,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
     setRetryingTarget(`${appId}-${target}`);
     setRetryFeedback(null);
     try {
+      const headers = await getAdminHeaders(adminEmail);
       const res = await fetch(`/api/applications/${appId}/retry`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-email': adminEmail,
+          ...headers,
         },
-        body: JSON.stringify({ target, adminEmail, force }),
+        body: JSON.stringify({ target, adminEmail, adminUid: auth.currentUser?.uid, force }),
       });
 
       const data = await res.json();
@@ -641,19 +674,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
                 <table className="w-full text-left border-collapse text-xs">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase tracking-wider text-[10px]">
+                      <th className="py-3 px-4">Applicant Name</th>
                       <th className="py-3 px-4">Application ID</th>
-                      <th className="py-3 px-4">Applicant Profile</th>
-                      <th className="py-3 px-4">Role & Year</th>
-                      <th className="py-3 px-4">Resume</th>
+                      <th className="py-3 px-4">Role</th>
                       <th className="py-3 px-4">Applied Date</th>
                       <th className="py-3 px-4">Status</th>
-                      <th className="py-3 px-4">Notifications</th>
-                      <th className="py-3 px-4 text-right">Decisions & Actions</th>
+                      <th className="py-3 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {filteredApps.map((app) => {
-                      const hasResume = !!app.resumeFileName;
                       const isPending = app.status === 'Pending';
                       const isAccepted = app.status === 'Accepted';
                       const isRejected = app.status === 'Rejected';
@@ -663,23 +693,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
                           key={app.applicationId}
                           className="hover:bg-slate-50/70 transition-colors"
                         >
-                          {/* ID */}
-                          <td className="py-3.5 px-4 font-mono font-bold text-slate-900">
-                            {app.applicationId}
-                          </td>
-
-                          {/* Profile */}
+                          {/* 1. Applicant Name */}
                           <td className="py-3.5 px-4">
                             <div className="font-bold text-slate-900 text-xs">{app.fullName}</div>
-                            <div className="text-slate-500 text-[11px] truncate max-w-[180px]">
+                            <div className="text-slate-500 text-[11px] truncate max-w-[200px]">
                               {app.email}
                             </div>
-                            <div className="text-slate-400 text-[10px] truncate max-w-[180px]">
+                            <div className="text-slate-400 text-[10px] truncate max-w-[200px]">
                               {app.college}
                             </div>
                           </td>
 
-                          {/* Role & Year */}
+                          {/* 2. Application ID */}
+                          <td className="py-3.5 px-4 font-mono font-bold text-slate-900">
+                            {app.applicationId}
+                          </td>
+
+                          {/* 3. Role */}
                           <td className="py-3.5 px-4">
                             <div className="font-semibold text-teal-900">{app.role}</div>
                             <div className="text-slate-500 text-[11px] flex items-center gap-1.5 mt-0.5">
@@ -697,22 +727,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
                             </div>
                           </td>
 
-                          {/* Resume */}
-                          <td className="py-3.5 px-4">
-                            {hasResume ? (
-                              <button
-                                onClick={() => setSelectedApp(app)}
-                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-teal-700 hover:text-teal-900 bg-teal-50 hover:bg-teal-100 px-2.5 py-1 rounded-lg border border-teal-200 transition-colors"
-                              >
-                                <FileText className="w-3.5 h-3.5" />
-                                <span>View</span>
-                              </button>
-                            ) : (
-                              <span className="text-slate-400 text-[11px]">None</span>
-                            )}
-                          </td>
-
-                          {/* Applied Date */}
+                          {/* 4. Applied Date */}
                           <td className="py-3.5 px-4 text-slate-600">
                             <div>{new Date(app.appliedAt).toLocaleDateString()}</div>
                             <div className="text-[10px] text-slate-400">
@@ -720,7 +735,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
                             </div>
                           </td>
 
-                          {/* Status */}
+                          {/* 5. Status */}
                           <td className="py-3.5 px-4">
                             {isPending && (
                               <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300">
@@ -742,97 +757,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
                             )}
                           </td>
 
-                          {/* Notifications / Diagnostics */}
-                          <td className="py-3.5 px-4">
-                            <div className="flex flex-col gap-1 text-[10px]">
-                              {/* Applicant confirmation */}
-                              <div className="flex items-center gap-1.5">
-                                <span
-                                  className={`w-2 h-2 rounded-full shrink-0 ${
-                                    app.emailProcessing?.applicantConfirmation?.status === 'Sent'
-                                      ? 'bg-emerald-500'
-                                      : app.emailProcessing?.applicantConfirmation?.status === 'Failed'
-                                      ? 'bg-rose-500'
-                                      : 'bg-amber-400'
-                                  }`}
-                                />
-                                <span className="text-slate-500 font-medium">Applicant:</span>
-                                <span
-                                  className={`font-bold ${
-                                    app.emailProcessing?.applicantConfirmation?.status === 'Sent'
-                                      ? 'text-emerald-700'
-                                      : app.emailProcessing?.applicantConfirmation?.status === 'Failed'
-                                      ? 'text-rose-700'
-                                      : 'text-amber-700'
-                                  }`}
-                                >
-                                  {app.emailProcessing?.applicantConfirmation?.status || 'Pending'}
-                                </span>
-                              </div>
-
-                              {/* Support Alert */}
-                              <div className="flex items-center gap-1.5">
-                                <span
-                                  className={`w-2 h-2 rounded-full shrink-0 ${
-                                    app.emailProcessing?.supportNotification?.status === 'Sent'
-                                      ? 'bg-blue-500'
-                                      : app.emailProcessing?.supportNotification?.status === 'Failed'
-                                      ? 'bg-rose-500'
-                                      : 'bg-amber-400'
-                                  }`}
-                                />
-                                <span className="text-slate-500 font-medium">Support:</span>
-                                <span
-                                  className={`font-bold ${
-                                    app.emailProcessing?.supportNotification?.status === 'Sent'
-                                      ? 'text-blue-700'
-                                      : app.emailProcessing?.supportNotification?.status === 'Failed'
-                                      ? 'text-rose-700'
-                                      : 'text-amber-700'
-                                  }`}
-                                >
-                                  {app.emailProcessing?.supportNotification?.status || 'Pending'}
-                                </span>
-                              </div>
-
-                              {/* Decision Notification */}
-                              {(isAccepted || isRejected) && (
-                                <div className="flex items-center gap-1.5">
-                                  <span
-                                    className={`w-2 h-2 rounded-full shrink-0 ${
-                                      app.emailProcessing?.decisionEmail?.status === 'Sent'
-                                        ? 'bg-purple-500'
-                                        : app.emailProcessing?.decisionEmail?.status === 'Failed'
-                                        ? 'bg-rose-500'
-                                        : 'bg-amber-400'
-                                    }`}
-                                  />
-                                  <span className="text-slate-500 font-medium">Decision:</span>
-                                  <span
-                                    className={`font-bold ${
-                                      app.emailProcessing?.decisionEmail?.status === 'Sent'
-                                        ? 'text-purple-700'
-                                        : app.emailProcessing?.decisionEmail?.status === 'Failed'
-                                        ? 'text-rose-700'
-                                        : 'text-amber-700'
-                                    }`}
-                                  >
-                                    {app.emailProcessing?.decisionEmail?.status || 'Pending'}
-                                  </span>
-                                </div>
-                              )}
-                            </div>
-                          </td>
-
-                          {/* Actions */}
+                          {/* 6. Actions */}
                           <td className="py-3.5 px-4 text-right">
                             <div className="flex items-center justify-end gap-1.5">
                               <button
                                 onClick={() => setSelectedApp(app)}
-                                className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors"
-                                title="Inspect Details"
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg text-[11px] font-semibold transition-colors"
+                                title="Inspect Details & Resume"
                               >
-                                <Eye className="w-4 h-4" />
+                                <Eye className="w-3.5 h-3.5" />
+                                <span>View</span>
                               </button>
 
                               {isPending && (
@@ -865,7 +799,36 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ adminEmail }) =>
                                   title="Download Genuine Offer Letter PDF"
                                 >
                                   <FileDown className="w-3.5 h-3.5 text-teal-600" />
-                                  <span>PDF</span>
+                                  <span>Offer PDF</span>
+                                </button>
+                              )}
+
+                              {isRejected && (
+                                <button
+                                  onClick={() => {
+                                    if (app.rejectionLetterUrl && app.rejectionLetterUrl.startsWith('data:application/pdf')) {
+                                      const link = document.createElement('a');
+                                      link.href = app.rejectionLetterUrl;
+                                      link.download = `Company_Tech_Evaluation_Letter_${app.applicationId}.pdf`;
+                                      link.click();
+                                    } else {
+                                      import('../lib/pdfGenerator').then(({ downloadRejectionLetterPdf }) => {
+                                        downloadRejectionLetterPdf({
+                                          applicationId: app.applicationId,
+                                          fullName: app.fullName,
+                                          email: app.email,
+                                          college: app.college,
+                                          role: app.role,
+                                          rejectionReason: app.decision?.rejectionReason,
+                                        });
+                                      });
+                                    }
+                                  }}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-lg text-[11px] font-medium transition-colors"
+                                  title="Download Evaluation Decision Letter PDF"
+                                >
+                                  <FileDown className="w-3.5 h-3.5 text-slate-500" />
+                                  <span>Letter</span>
                                 </button>
                               )}
                             </div>

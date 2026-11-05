@@ -29,6 +29,7 @@ import {
   EyeOff,
   Building,
 } from 'lucide-react';
+import { AdminLogin } from './AdminLogin';
 
 const AUTHORIZED_ADMIN_EMAIL = 'madhurashekarraju@gmail.com';
 
@@ -38,6 +39,7 @@ interface AuthPageProps {
 
 export const AuthPage: React.FC<AuthPageProps> = ({ onAuthSuccess }) => {
   const [activeTab, setActiveTab] = useState<'login' | 'register'>('login');
+  const [showAdminModal, setShowAdminModal] = useState(false);
 
   // Login form state
   const [loginEmail, setLoginEmail] = useState('');
@@ -321,12 +323,22 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onAuthSuccess }) => {
           <span className="text-[10px] font-bold uppercase tracking-widest text-teal-400 bg-teal-950/80 px-2.5 py-0.5 rounded border border-teal-800">
             Admissions Portal
           </span>
-          <h1 className="text-2xl font-black text-white mt-2 tracking-tight">
+          <h1 className="text-2xl font-black text-white mt-2 tracking-tight font-heading">
             COMPANY TECH
           </h1>
           <p className="text-xs text-slate-400 mt-1 max-w-xs mx-auto">
             Internship Application & Management Automation System
           </p>
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={() => setShowAdminModal(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1 bg-white/10 hover:bg-white/20 text-[#d6ef70] rounded-full text-[11px] font-bold border border-white/10 transition-colors"
+            >
+              <Shield className="w-3.5 h-3.5" />
+              <span>Administrator Portal Login</span>
+            </button>
+          </div>
         </div>
 
         {/* Tab Switcher */}
@@ -652,6 +664,18 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onAuthSuccess }) => {
           )}
         </div>
       </div>
+
+      {/* Secure Google Administrator Authentication Modal */}
+      {showAdminModal && (
+        <AdminLogin
+          onSuccess={async (adminUser) => {
+            setShowAdminModal(false);
+            const profile = await resolveUserProfile(adminUser.uid, adminUser.email, 'Authorized Administrator', 'admin');
+            onAuthSuccess(profile);
+          }}
+          onCancel={() => setShowAdminModal(false)}
+        />
+      )}
     </div>
   );
 };

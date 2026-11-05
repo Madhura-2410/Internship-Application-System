@@ -489,7 +489,8 @@ export class EmailService {
   public static async sendRejectionEmail(
     app: InternshipApplication,
     reason?: string,
-    force?: boolean
+    force?: boolean,
+    pdfBuffer?: Buffer
   ): Promise<EmailDispatchResult> {
     const subject = `Application Update: ${app.role} Internship - Company Tech (ID: ${app.applicationId})`;
     const html = `
@@ -500,10 +501,11 @@ export class EmailService {
         </div>
         <p style="font-size: 15px; line-height: 1.6;">Dear <strong>${app.fullName}</strong>,</p>
         <p style="font-size: 15px; line-height: 1.6;">Thank you for your interest in the <strong>${app.role}</strong> internship at <strong>Company Tech</strong> and for taking the time to share your academic accomplishments with us.</p>
-        <p style="font-size: 14px; line-height: 1.6; color: #334155;">After a thorough and competitive evaluation of all candidates for this cycle, we regret to inform you that we are unable to offer you an internship position at this time.</p>
+        <p style="font-size: 14px; line-height: 1.6; color: #334155;">After a thorough and competitive evaluation of all candidates for this cohort, we regret to inform you that we are unable to offer you an internship position at this time.</p>
+        <p style="font-size: 14px; line-height: 1.6; color: #334155;">An official <strong>Evaluation Status & Decision Letter</strong> has been prepared and attached to this email in PDF format for your records.</p>
         ${
           reason
-            ? `<div style="background: #f8fafc; border-left: 3px solid #94a3b8; padding: 10px 14px; margin: 16px 0; font-size: 13px; color: #475569;">${reason}</div>`
+            ? `<div style="background: #f8fafc; border-left: 3px solid #94a3b8; padding: 10px 14px; margin: 16px 0; font-size: 13px; color: #475569;"><strong>Feedback / Evaluation Context:</strong> ${reason}</div>`
             : ''
         }
         <p style="font-size: 14px; line-height: 1.6; color: #475569;">The volume of highly qualified applications was substantial, making our selection process particularly difficult. We will keep your profile in our talent network for prospective future openings that match your skills.</p>
@@ -512,13 +514,24 @@ export class EmailService {
         <p style="font-size: 12px; color: #94a3b8; margin: 0;">Company Tech Recruitment Team • admissions@companytech.internal • Ref: ${app.applicationId}</p>
       </div>
     `;
-    const text = `Dear ${app.fullName},\n\nThank you for applying for the ${app.role} internship at Company Tech (Application ID: ${app.applicationId}).\nWe regret to inform you that we are unable to offer you an internship position at this time.\nWe wish you all the best in your career pursuits.\n\nCompany Tech Recruitment Team`;
+    const text = `Dear ${app.fullName},\n\nThank you for applying for the ${app.role} internship at Company Tech (Application ID: ${app.applicationId}).\nWe regret to inform you that we are unable to offer you an internship position at this time.\nAn official Evaluation Decision Letter is attached in PDF format.\nWe wish you all the best in your career pursuits.\n\nCompany Tech Recruitment Team`;
+
+    const attachments = pdfBuffer
+      ? [
+          {
+            filename: `Company_Tech_Evaluation_Letter_${app.applicationId}.pdf`,
+            content: pdfBuffer,
+            contentType: 'application/pdf',
+          },
+        ]
+      : undefined;
 
     return this.dispatchEmail({
       to: app.email,
       subject,
       html,
       text,
+      attachments,
       applicationId: app.applicationId,
       logType: 'decision_rejection',
       metadata: {

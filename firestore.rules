@@ -26,6 +26,7 @@ service cloud.firestore {
 
     function isAdmin() {
       return isSignedIn() && (
+        request.auth.uid == 'YYU209EtncOw8SQLH15dkOhctdT2' ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
         request.auth.token.email == 'madhurashekarraju@gmail.com'
       );
@@ -85,10 +86,14 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // Admins Collection
+    // Admins Collection: Only authorized master admin can bootstrap or modify admin records
     match /admins/{adminId} {
-      allow get, list: if true;
-      allow create, update, delete: if true;
+      allow get, list: if isSignedIn();
+      allow create, update: if isSignedIn() && (
+        request.auth.token.email == 'madhurashekarraju@gmail.com' ||
+        isAdmin()
+      );
+      allow delete: if isAdmin();
     }
 
     // Duplicate Prevention Roll

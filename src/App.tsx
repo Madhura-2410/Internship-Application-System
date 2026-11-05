@@ -44,16 +44,29 @@ export default function App() {
         const normalizedEmail = user.email.toLowerCase();
         const isMasterAdmin = normalizedEmail === AUTHORIZED_ADMIN_EMAIL.toLowerCase();
 
-        let role: UserRole = isMasterAdmin ? 'admin' : 'employee';
+        let role: UserRole = 'employee';
         let name = user.displayName || normalizedEmail.split('@')[0];
 
         try {
+          // If master admin email, verify admin document in Firestore
+          if (isMasterAdmin) {
+            const adminDoc = await getDoc(doc(db, 'admins', user.uid));
+            if (adminDoc.exists()) {
+              role = 'admin';
+            } else {
+              // Master admin first login - will be initialized during AdminLogin or resolved
+              role = 'admin';
+            }
+          }
+
           const userDoc = await getDoc(doc(db, 'users', user.uid));
           if (userDoc.exists()) {
             const data = userDoc.data();
             if (data.name) name = data.name;
-            if (!isMasterAdmin && data.role) {
-              role = data.role as UserRole;
+            if (!isMasterAdmin && data.role === 'admin') {
+              // Verify they are really an admin in the admins collection
+              const adminDoc = await getDoc(doc(db, 'admins', user.uid));
+              role = adminDoc.exists() ? 'admin' : 'employee';
             }
           }
         } catch (err) {

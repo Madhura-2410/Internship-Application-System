@@ -61,23 +61,18 @@ export const Navbar: React.FC<NavbarProps> = ({
                   setCurrentTab('roles');
                 }
               }}
-              className="flex items-center gap-3 cursor-pointer group"
+              className="flex items-center gap-3 cursor-pointer group select-none"
             >
-              <div className="w-9 h-9 rounded-xl bg-slate-900 flex items-center justify-center text-white shadow-xs group-hover:bg-teal-600 transition-colors">
-                <Briefcase className="w-5 h-5 text-teal-400 group-hover:text-white" />
+              <div className="w-9 h-9 rounded-xl bg-[#172321] flex items-center justify-center text-white shadow-xs group-hover:bg-[#9ac637] transition-colors">
+                <Briefcase className="w-5 h-5 text-[#d6ef70] group-hover:text-[#172321]" />
               </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-extrabold text-base sm:text-lg tracking-tight text-slate-900">
-                    COMPANY TECH
-                  </span>
-                  <span className="text-[10px] font-bold tracking-wider uppercase px-2 py-0.5 bg-slate-100 text-slate-700 rounded border border-slate-200">
-                    {activeMode === 'admin' ? 'Admin Portal' : 'Admissions'}
-                  </span>
-                </div>
-                <p className="text-[10px] text-slate-500 font-medium hidden sm:block">
-                  Internship Application & Management Automation System
-                </p>
+              <div className="flex items-center gap-2">
+                <span className="font-extrabold text-base sm:text-lg tracking-tight text-[#172321] font-heading">
+                  COMPANY TECH
+                </span>
+                <span className="text-[10px] font-bold tracking-wider uppercase px-2 py-0.5 bg-[#d6ef70]/30 text-[#172321] rounded-full border border-[#9ac637]/40">
+                  {activeMode === 'admin' ? 'Admin Portal' : 'Admissions'}
+                </span>
               </div>
             </div>
 

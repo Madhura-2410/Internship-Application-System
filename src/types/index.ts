@@ -259,6 +259,7 @@ export interface InternshipApplication {
   decision?: DecisionMetadata;
   offerLetterStoragePath?: string;
   offerLetterUrl?: string;
+  rejectionLetterUrl?: string;
   emailProcessing: EmailProcessingState;
 }
 
